@@ -1,7 +1,7 @@
 # HEICShift
 
 ## Overview
-Universal image batch converter with PyQt6 GUI. Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO/CUR files to JPEG, PNG, WebP, or TIFF with full metadata preservation.
+Universal image batch converter with PyQt6 GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO/CUR files to JPEG, PNG, WebP, or TIFF with full metadata preservation.
 
 ## Tech Stack
 - **Language**: Python 3.10+
@@ -38,6 +38,8 @@ python heicshift.py --version
 ## Supported Input Formats
 | Format | Extensions | Decoder | Required |
 |---|---|---|---|
+| JPEG | .jpg .jpeg .jpe .jfif | Pillow | Yes |
+| PNG | .png | Pillow | Yes |
 | HEIC/HEIF | .heic .heif .hif | pillow-heif | Yes |
 | AVIF | .avif | pillow-heif | Yes |
 | WebP | .webp | Pillow | Yes |
@@ -51,6 +53,7 @@ python heicshift.py --version
 
 ## Features
 - Auto-detect format: JPEG for photos, PNG for transparent images
+- **JPEG/PNG as input**: convert between any supported formats (JPEG->WebP, PNG->JPEG, etc.); same-format no-op auto-skipped unless resize/sRGB/strip-metadata is active
 - **CLI mode**: headless conversion via `--input` flag with `--dry-run`, `--strip-metadata`, `--resize`, exit codes
 - **In-place mode**: converts next to the original file and deletes source on success
 - **Atomic writes**: in-place mode uses temp file + `os.replace()` for crash-safe conversion
@@ -122,6 +125,7 @@ python heicshift.py --version
 - `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.5.1 — JPEG/PNG input support (universal converter), same-format no-op skip guard
 - v2.5.0 — CLI mode (headless conversion), disk space pre-check, strip metadata option, auto-open output folder, file count in title bar, resize upscaling guard, better error logging (warnings), stats color reset, dependency version logging
 - v2.4.0 — Atomic writes for in-place mode, output file validation, dark title bar, conversion presets, smart format-dependent option visibility, log context menu, source/output overlap guard, elapsed time + speed stats
 - v2.3.0 — Memory safety (try/finally in convert_file), drag & drop hover visual, completion sound, JPEG chroma subsampling toggle, sRGB color space conversion, TIFF compression, PNG compression level, output format tooltips

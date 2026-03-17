@@ -1,15 +1,15 @@
 """
-HEICShift v2.5.0 - High-performance image batch converter
-Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, RAW,
-TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF.
-Auto-detects optimal format: PNG for images with transparency, JPEG for photos.
-Preserves EXIF metadata, ICC color profiles, and XMP data.
-Supports CLI mode for headless/scripted operation.
+HEICShift v2.5.1 - High-performance universal image batch converter
+Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP,
+JPEG XL, RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG,
+WebP, or TIFF. Auto-detects optimal format: PNG for images with
+transparency, JPEG for photos. Preserves EXIF metadata, ICC color
+profiles, and XMP data. Supports CLI mode for headless/scripted operation.
 """
 
 import sys, os, subprocess, importlib, platform, ctypes, argparse, shutil
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -388,6 +388,8 @@ HEIC_EXTS = {".heic", ".heif", ".hif"}
 AVIF_EXTS = {".avif"}
 
 # Always available (Pillow built-in)
+JPEG_EXTS  = {".jpg", ".jpeg", ".jpe", ".jfif"}
+PNG_EXTS   = {".png"}
 WEBP_EXTS  = {".webp"}
 TIFF_EXTS  = {".tif", ".tiff"}
 BMP_EXTS   = {".bmp"}
@@ -401,6 +403,8 @@ QOI_EXTS = {".qoi"}
 
 # Family name -> (extension set, availability flag)
 FORMAT_FAMILIES = {
+    "JPEG":        (JPEG_EXTS, True),
+    "PNG":         (PNG_EXTS, True),
     "HEIC/HEIF":   (HEIC_EXTS, True),
     "AVIF":        (AVIF_EXTS, True),
     "WebP":        (WEBP_EXTS, True),
@@ -416,7 +420,7 @@ FORMAT_FAMILIES = {
 
 def get_supported_extensions() -> set[str]:
     """Return all input extensions we can currently decode."""
-    exts = HEIC_EXTS | AVIF_EXTS | WEBP_EXTS | TIFF_EXTS | BMP_EXTS | JP2_EXTS | ICO_EXTS
+    exts = JPEG_EXTS | PNG_EXTS | HEIC_EXTS | AVIF_EXTS | WEBP_EXTS | TIFF_EXTS | BMP_EXTS | JP2_EXTS | ICO_EXTS
     if HAS_JXL:
         exts |= JXL_EXTS
     if HAS_RAWPY:
@@ -428,7 +432,7 @@ def get_supported_extensions() -> set[str]:
 
 def get_format_support_summary() -> str:
     """Human-readable list of supported format families."""
-    families = ["HEIC/HEIF", "AVIF", "WebP", "TIFF", "BMP", "JPEG 2000", "ICO/CUR"]
+    families = ["JPEG", "PNG", "HEIC/HEIF", "AVIF", "WebP", "TIFF", "BMP", "JPEG 2000", "ICO/CUR"]
     if HAS_JXL:
         families.append("JPEG XL")
     if HAS_RAWPY:
@@ -609,6 +613,26 @@ def convert_file(
             out_fmt = "TIFF"
         else:
             out_fmt = "JPEG"
+
+        # Same-format guard — skip if input is already the output format
+        # and no processing (resize, sRGB, strip metadata) is requested
+        src_ext = src.suffix.lower()
+        same_fmt = (
+            (out_fmt == "JPEG" and src_ext in JPEG_EXTS)
+            or (out_fmt == "PNG" and src_ext in PNG_EXTS)
+            or (out_fmt == "WEBP" and src_ext in WEBP_EXTS)
+            or (out_fmt == "TIFF" and src_ext in TIFF_EXTS)
+        )
+        no_processing = (
+            resize_mode == "none"
+            and not convert_to_srgb
+            and preserve_metadata
+        )
+        if same_fmt and no_processing:
+            result.skipped = True
+            result.warnings.append(f"Skipped: already {out_fmt} and no processing requested")
+            result.elapsed = time.perf_counter() - t0
+            return result
 
         ext_map = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "TIFF": ".tiff"}
         ext = ext_map.get(out_fmt, ".jpg")
@@ -1643,7 +1667,11 @@ class MainWindow(QMainWindow):
             ext_counts: dict[str, int] = {}
             for f in result.files:
                 s = f.suffix.lower()
-                if s in HEIC_EXTS:
+                if s in JPEG_EXTS:
+                    ext_counts["JPEG"] = ext_counts.get("JPEG", 0) + 1
+                elif s in PNG_EXTS:
+                    ext_counts["PNG"] = ext_counts.get("PNG", 0) + 1
+                elif s in HEIC_EXTS:
                     ext_counts["HEIC"] = ext_counts.get("HEIC", 0) + 1
                 elif s in AVIF_EXTS:
                     ext_counts["AVIF"] = ext_counts.get("AVIF", 0) + 1

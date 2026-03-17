@@ -1,6 +1,6 @@
 # HEICShift
 
-Universal image batch converter with a modern GUI. Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF with full metadata preservation.
+Universal image batch converter with a modern GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF with full metadata preservation.
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -17,12 +17,14 @@ Most image converters get the details wrong — they strip metadata, mangle colo
 | **Format selection** | Force you to pick JPEG or PNG for everything | Auto-detects: JPEG for photos, PNG only when transparency exists |
 | **Metadata** | Online converters and many CLI tools strip EXIF/GPS/timestamps | Preserves EXIF, ICC, and XMP data by default |
 | **Performance** | Single-threaded or limited concurrency | Parallel conversion with configurable worker count (up to 32) |
-| **Format coverage** | Most only handle HEIC or one format at a time | 10+ input format families from a single tool |
+| **Format coverage** | Most only handle HEIC or one format at a time | 12+ input format families from a single tool |
 
 ## Supported Input Formats
 
 | Format | Extensions | Decoder | Install |
 |---|---|---|---|
+| JPEG | `.jpg` `.jpeg` `.jpe` `.jfif` | Pillow | Auto |
+| PNG | `.png` | Pillow | Auto |
 | HEIC/HEIF | `.heic` `.heif` `.hif` | pillow-heif | Auto |
 | AVIF | `.avif` | pillow-heif | Auto |
 | WebP | `.webp` | Pillow | Auto |
@@ -41,7 +43,8 @@ Optional decoders are installed automatically on first launch. If installation f
 ## Features
 
 - **Auto format detection** — JPEG for photos, PNG when alpha channel is present
-- **10+ input formats** — HEIC, AVIF, WebP, JXL, RAW, TIFF, BMP, JP2, QOI, ICO
+- **12+ input formats** — JPEG, PNG, HEIC, AVIF, WebP, JXL, RAW, TIFF, BMP, JP2, QOI, ICO
+- **Cross-format conversion** — convert between any formats (JPEG to WebP, PNG to JPEG, etc.); same-format no-ops auto-skipped
 - **CLI mode** — headless conversion via `--input` flag for scripting and automation
 - **In-place conversion** — convert next to the original and delete the source file
 - **Atomic writes** — in-place mode uses temp file + atomic rename for crash-safe conversion
