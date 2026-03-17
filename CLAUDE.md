@@ -1,7 +1,7 @@
 # HEICShift
 
 ## Overview
-Universal image batch converter with PyQt6 GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO/CUR files to JPEG, PNG, WebP, or TIFF with full metadata preservation.
+Universal image batch converter with PyQt6 GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO/CUR files to JPEG, PNG, WebP, AVIF, or TIFF with full metadata preservation.
 
 ## Tech Stack
 - **Language**: Python 3.10+
@@ -54,7 +54,8 @@ python heicshift.py --version
 ## Features
 - Auto-detect format: JPEG for photos, PNG for transparent images
 - **JPEG/PNG as input**: convert between any supported formats (JPEG->WebP, PNG->JPEG, etc.); same-format no-op auto-skipped unless resize/sRGB/strip-metadata is active
-- **CLI mode**: headless conversion via `--input` flag with `--dry-run`, `--strip-metadata`, `--resize`, exit codes
+- **AVIF output**: AVIF encoding via Pillow's native AV1 codec with quality slider
+- **CLI mode**: headless conversion via `--input` flag with full feature parity (all GUI options exposed as flags)
 - **In-place mode**: converts next to the original file and deletes source on success
 - **Atomic writes**: in-place mode uses temp file + `os.replace()` for crash-safe conversion
 - **Output validation**: verifies output exists, has size > 0, passes `Image.verify()` before accepting
@@ -66,7 +67,8 @@ python heicshift.py --version
 - **Better error logging**: `ConvertResult.warnings` field, `[WARN]` log lines for sRGB failures, RAW metadata, resize skips
 - **Stats color reset**: stat label colors reset to green on new batch start
 - **Dependency version logging**: Pillow/pillow-heif/PyQt6 + optional dep versions on startup
-- **Drag & drop**: drop a folder onto the window to set source directory
+- **CSV export**: structured conversion report with per-file status, sizes, timing, warnings
+- **Drag & drop**: drop folders or individual image files onto the window
 - **Format filter**: per-family checkboxes to include/exclude input formats from scanning
 - **Skip existing**: resume interrupted batches by skipping files with existing output
 - **EXIF auto-rotate**: applies orientation from EXIF before saving (prevents double-rotation)
@@ -118,6 +120,7 @@ python heicshift.py --version
 - `_update_title()` — dynamic window title with file count / conversion progress / done summary
 - `_apply_dark_titlebar()` — uses DwmSetWindowAttribute for native dark title bar on Windows
 - `_on_log_context_menu()` — right-click menu for log panel with copy and open file location
+- `_export_csv()` — CSV report export of conversion results
 - `ScanWorker(QThread)` scans in background, accepts filtered extension set
 - `ConvertWorker(QThread)` manages ThreadPoolExecutor for parallel conversion, emits `current_file` signal
 - GUI updates via pyqtSignal
@@ -125,6 +128,7 @@ python heicshift.py --version
 - `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.6.0 — AVIF output format (Pillow native AV1), CSV conversion report export, drag & drop individual files, CLI parity (--skip-existing, --progressive, --chroma-420, --lossless, --srgb, --prefix, --suffix, --no-structure), wall-clock time in done summary
 - v2.5.1 — JPEG/PNG input support (universal converter), same-format no-op skip guard
 - v2.5.0 — CLI mode (headless conversion), disk space pre-check, strip metadata option, auto-open output folder, file count in title bar, resize upscaling guard, better error logging (warnings), stats color reset, dependency version logging
 - v2.4.0 — Atomic writes for in-place mode, output file validation, dark title bar, conversion presets, smart format-dependent option visibility, log context menu, source/output overlap guard, elapsed time + speed stats
@@ -146,3 +150,5 @@ python heicshift.py --version
 - Format filter state persisted as JSON in QSettings
 - Atomic writes use `.heicshift.tmp` suffix — temp files cleaned on failure, absent on success
 - Source/output overlap guard blocks exact same dir but warns (not blocks) for subdirs since `source/converted` is the default pattern
+- AVIF output requires Pillow 11+ (native AV1 support) — auto-installed by bootstrap
+- AVIF encoding quality defaults use same slider as JPEG/WebP (50-100), speed=6 (balanced)

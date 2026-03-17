@@ -1,15 +1,15 @@
 """
-HEICShift v2.5.1 - High-performance universal image batch converter
+HEICShift v2.6.0 - High-performance universal image batch converter
 Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP,
 JPEG XL, RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG,
-WebP, or TIFF. Auto-detects optimal format: PNG for images with
+WebP, AVIF, or TIFF. Auto-detects optimal format: PNG for images with
 transparency, JPEG for photos. Preserves EXIF metadata, ICC color
 profiles, and XMP data. Supports CLI mode for headless/scripted operation.
 """
 
 import sys, os, subprocess, importlib, platform, ctypes, argparse, shutil
 
-APP_VERSION = "2.5.1"
+APP_VERSION = "2.6.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -611,6 +611,8 @@ def convert_file(
             out_fmt = "WEBP"
         elif fmt == "tiff":
             out_fmt = "TIFF"
+        elif fmt == "avif":
+            out_fmt = "AVIF"
         else:
             out_fmt = "JPEG"
 
@@ -621,6 +623,7 @@ def convert_file(
             (out_fmt == "JPEG" and src_ext in JPEG_EXTS)
             or (out_fmt == "PNG" and src_ext in PNG_EXTS)
             or (out_fmt == "WEBP" and src_ext in WEBP_EXTS)
+            or (out_fmt == "AVIF" and src_ext in AVIF_EXTS)
             or (out_fmt == "TIFF" and src_ext in TIFF_EXTS)
         )
         no_processing = (
@@ -634,7 +637,7 @@ def convert_file(
             result.elapsed = time.perf_counter() - t0
             return result
 
-        ext_map = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "TIFF": ".tiff"}
+        ext_map = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "AVIF": ".avif", "TIFF": ".tiff"}
         ext = ext_map.get(out_fmt, ".jpg")
 
         # Build output path — in-place writes next to the source file
@@ -697,6 +700,9 @@ def convert_file(
                 save_kwargs["compression"] = "tiff_lzw"
             elif tiff_compression == "deflate":
                 save_kwargs["compression"] = "tiff_deflate"
+        elif out_fmt == "AVIF":
+            save_kwargs["quality"] = jpeg_quality
+            save_kwargs["speed"] = 6
 
         # Atomic write: use temp file for in-place mode
         if in_place:
@@ -950,7 +956,7 @@ PRESETS = {
         "resize_value": 1080,
     },
     "Print / TIFF": {
-        "fmt": 4,              # TIFF
+        "fmt": 5,              # TIFF
         "tiff_compression": 1, # LZW
         "resize_enabled": False,
     },
@@ -959,7 +965,7 @@ PRESETS = {
 
 # ── Disk Space Estimation ─────────────────────────────────────────────────────
 
-SIZE_ESTIMATE_FACTORS = {"jpeg": 0.8, "auto": 0.8, "png": 1.2, "webp": 0.7, "tiff": 1.5}
+SIZE_ESTIMATE_FACTORS = {"jpeg": 0.8, "auto": 0.8, "png": 1.2, "webp": 0.7, "avif": 0.5, "tiff": 1.5}
 
 
 def _estimate_output_size(total_input_bytes: int, fmt: str) -> int:
@@ -1158,13 +1164,14 @@ class MainWindow(QMainWindow):
         self.fmt_combo = QComboBox()
         self.fmt_combo.addItems([
             "Auto (JPEG for photos, PNG for transparency)",
-            "JPEG", "PNG", "WebP", "TIFF"
+            "JPEG", "PNG", "WebP", "AVIF", "TIFF"
         ])
         self.fmt_combo.setItemData(0, "JPEG for photos, PNG when transparency exists", Qt.ItemDataRole.ToolTipRole)
         self.fmt_combo.setItemData(1, "Best for photographs, lossy compression", Qt.ItemDataRole.ToolTipRole)
         self.fmt_combo.setItemData(2, "Lossless, supports transparency", Qt.ItemDataRole.ToolTipRole)
         self.fmt_combo.setItemData(3, "Modern format, smaller files", Qt.ItemDataRole.ToolTipRole)
-        self.fmt_combo.setItemData(4, "Lossless, professional workflows", Qt.ItemDataRole.ToolTipRole)
+        self.fmt_combo.setItemData(4, "Next-gen AV1 codec, best compression ratio", Qt.ItemDataRole.ToolTipRole)
+        self.fmt_combo.setItemData(5, "Lossless, professional workflows", Qt.ItemDataRole.ToolTipRole)
         opt_grid.addWidget(self.fmt_combo, 0, 1, 1, 2)
 
         self._preset_btn = QToolButton()
@@ -1363,6 +1370,13 @@ class MainWindow(QMainWindow):
         self.export_log_btn.clicked.connect(self._export_log)
         log_header.addWidget(self.export_log_btn)
 
+        self.export_csv_btn = QPushButton("Export CSV")
+        self.export_csv_btn.setFixedHeight(24)
+        self.export_csv_btn.setStyleSheet("font-size: 11px; padding: 2px 10px;")
+        self.export_csv_btn.setToolTip("Export conversion results as a CSV report")
+        self.export_csv_btn.clicked.connect(self._export_csv)
+        log_header.addWidget(self.export_csv_btn)
+
         self.clear_log_btn = QPushButton("Clear")
         self.clear_log_btn.setFixedHeight(24)
         self.clear_log_btn.setStyleSheet("font-size: 11px; padding: 2px 10px;")
@@ -1406,11 +1420,14 @@ class MainWindow(QMainWindow):
     # ── Drag & Drop ──
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
+            supported = get_supported_extensions()
             for url in event.mimeData().urls():
-                if url.isLocalFile() and Path(url.toLocalFile()).is_dir():
-                    event.acceptProposedAction()
-                    self.src_edit.setStyleSheet(f"border: 2px solid {CAT['lavender']};")
-                    return
+                if url.isLocalFile():
+                    p = Path(url.toLocalFile())
+                    if p.is_dir() or (p.is_file() and p.suffix.lower() in supported):
+                        event.acceptProposedAction()
+                        self.src_edit.setStyleSheet(f"border: 2px solid {CAT['lavender']};")
+                        return
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasUrls():
@@ -1421,7 +1438,10 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event: QDropEvent):
         self.src_edit.setStyleSheet("")
-        for url in event.mimeData().urls():
+        urls = event.mimeData().urls()
+
+        # Check for directory drop first
+        for url in urls:
             path = url.toLocalFile()
             if Path(path).is_dir():
                 self.src_edit.setText(path)
@@ -1431,6 +1451,28 @@ class MainWindow(QMainWindow):
                 self._log(f"Source set via drag & drop: {path}")
                 event.acceptProposedAction()
                 return
+
+        # Handle individual file drops
+        supported = get_supported_extensions()
+        files = []
+        for url in urls:
+            p = Path(url.toLocalFile())
+            if p.is_file() and p.suffix.lower() in supported:
+                files.append(p)
+
+        if files:
+            total_size = sum(f.stat().st_size for f in files)
+            self._scan_result = ScanResult(files=files, total_size=total_size, elapsed=0)
+            common_parent = str(Path(os.path.commonpath([str(f.parent) for f in files])))
+            self.src_edit.setText(common_parent)
+            if not self.dst_edit.text() and not self.inplace_chk.isChecked():
+                self.dst_edit.setText(str(Path(common_parent) / "converted"))
+            self.stat_files._val.setText(str(len(files)))
+            self.stat_size._val.setText(_fmt_size(total_size))
+            self.convert_btn.setEnabled(True)
+            self._update_title("scanned", count=len(files))
+            self._log(f"Added {len(files)} file{'s' if len(files) != 1 else ''} via drag & drop")
+            event.acceptProposedAction()
 
     # ── Log context menu ──
     def _on_log_context_menu(self, pos):
@@ -1562,15 +1604,16 @@ class MainWindow(QMainWindow):
     # ── Format-dependent controls ──
     def _on_format_changed(self, idx: int):
         """Show/hide format-specific controls based on selected output format."""
-        # idx: 0=Auto, 1=JPEG, 2=PNG, 3=WebP, 4=TIFF
+        # idx: 0=Auto, 1=JPEG, 2=PNG, 3=WebP, 4=AVIF, 5=TIFF
         is_auto = idx == 0
         is_jpeg = idx == 1
         is_png = idx == 2
         is_webp = idx == 3
-        is_tiff = idx == 4
+        is_avif = idx == 4
+        is_tiff = idx == 5
 
-        # Quality slider: JPEG, WebP, Auto
-        show_quality = is_auto or is_jpeg or is_webp
+        # Quality slider: JPEG, WebP, AVIF, Auto
+        show_quality = is_auto or is_jpeg or is_webp or is_avif
         self.quality_desc_label.setVisible(show_quality)
         self.quality_slider.setVisible(show_quality)
         self.quality_label.setVisible(show_quality)
@@ -1580,6 +1623,8 @@ class MainWindow(QMainWindow):
             self.quality_desc_label.setText("JPEG Quality:")
         elif is_webp:
             self.quality_desc_label.setText("WebP Quality:")
+        elif is_avif:
+            self.quality_desc_label.setText("AVIF Quality:")
         else:
             self.quality_desc_label.setText("JPEG/WebP Quality:")
 
@@ -1624,6 +1669,32 @@ class MainWindow(QMainWindow):
         if path:
             Path(path).write_text(self.log_view.toPlainText(), encoding="utf-8")
             self._log(f"Log exported to {path}")
+
+    def _export_csv(self):
+        """Export conversion results as a CSV report."""
+        if not self._results:
+            self._log("[ERROR] No conversion results to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export CSV Report", str(Path.home() / "heicshift_report.csv"),
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        if path:
+            import csv
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Source", "Output", "Status", "Size Before", "Size After",
+                                 "Delta", "Elapsed (s)", "Warnings"])
+                for r in self._results:
+                    status = "OK" if r.success else ("SKIP" if r.skipped else "FAIL")
+                    delta = r.size_before - r.size_after if r.success else 0
+                    writer.writerow([
+                        str(r.src), str(r.dst or ""), status,
+                        r.size_before, r.size_after, delta,
+                        f"{r.elapsed:.3f}",
+                        "; ".join(r.warnings) if r.warnings else "",
+                    ])
+            self._log(f"CSV report exported to {path}")
 
     def _clear_log(self):
         self.log_view.clear()
@@ -1731,7 +1802,7 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError):
                 pass
 
-        fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "tiff"}
+        fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "avif", 5: "tiff"}
         fmt = fmt_map.get(self.fmt_combo.currentIndex(), "auto")
 
         # Disk space pre-check
@@ -1879,6 +1950,7 @@ class MainWindow(QMainWindow):
         fail = sum(1 for r in results if not r.success and not r.skipped)
         deleted = sum(1 for r in results if r.src_deleted)
         total_time = sum(r.elapsed for r in results)
+        wall_time = time.perf_counter() - self._convert_start_time
         saved = sum(r.size_before - r.size_after for r in results if r.success)
 
         parts = [f"{ok} converted"]
@@ -1891,7 +1963,7 @@ class MainWindow(QMainWindow):
         summary = (
             f"Done! {', '.join(parts)}. "
             f"Space {'saved' if saved >= 0 else 'added'}: {_fmt_size(abs(saved))}. "
-            f"Total processing time: {total_time:.1f}s"
+            f"Wall time: {_fmt_eta(wall_time)} ({total_time:.1f}s processing)"
         )
         self._log(f"\n{'='*60}")
         self._log(summary)
@@ -2047,7 +2119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("-i", "--input", type=str, help="Source directory to scan")
     p.add_argument("-o", "--output", type=str, help="Output directory (default: <input>/converted)")
     p.add_argument("-f", "--format", type=str, default="auto",
-                   choices=["auto", "jpeg", "png", "webp", "tiff"],
+                   choices=["auto", "jpeg", "png", "webp", "avif", "tiff"],
                    help="Output format (default: auto)")
     p.add_argument("-q", "--quality", type=int, default=92, help="JPEG/WebP quality 50-100 (default: 92)")
     p.add_argument("-w", "--workers", type=int, default=min(os.cpu_count() or 4, 8),
@@ -2061,6 +2133,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strip-metadata", action="store_true", help="Remove all metadata from output files")
     p.add_argument("--resize", type=str, default=None, metavar="max_dim:VALUE",
                    help="Resize by max dimension, e.g. max_dim:1920")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="Skip files where output already exists")
+    p.add_argument("--progressive", action="store_true",
+                   help="Save JPEGs as progressive")
+    p.add_argument("--chroma-420", action="store_true",
+                   help="Use 4:2:0 chroma subsampling for JPEG")
+    p.add_argument("--lossless", action="store_true",
+                   help="Save WebP in lossless mode")
+    p.add_argument("--srgb", action="store_true",
+                   help="Convert embedded ICC profiles to sRGB")
+    p.add_argument("--prefix", type=str, default="",
+                   help="Prepend text to output filenames")
+    p.add_argument("--suffix", type=str, default="",
+                   help="Append text to output filenames")
+    p.add_argument("--no-structure", action="store_true",
+                   help="Flatten output (no subdirectory mirroring)")
     return p
 
 
@@ -2101,6 +2189,19 @@ def _run_cli(args):
     print(f"Input:  {input_dir}")
     print(f"Output: {output_dir}")
     print(f"Format: {args.format}  Quality: {args.quality}  Workers: {args.workers}")
+    flags = []
+    if args.skip_existing: flags.append("skip-existing")
+    if args.progressive: flags.append("progressive")
+    if args.chroma_420: flags.append("chroma-4:2:0")
+    if args.lossless: flags.append("lossless")
+    if args.srgb: flags.append("sRGB")
+    if args.no_structure: flags.append("flatten")
+    if flags:
+        print(f"Options: {', '.join(flags)}")
+    if args.prefix:
+        print(f"Prefix: '{args.prefix}'")
+    if args.suffix:
+        print(f"Suffix: '{args.suffix}'")
 
     # Parse resize
     resize_mode = "none"
@@ -2168,9 +2269,10 @@ def _run_cli(args):
         for f in scan.files:
             fut = pool.submit(
                 convert_file, f, output_dir, args.format, args.quality,
-                preserve_meta, False, input_dir, args.in_place, False,
-                resize_mode, resize_value, "", "", False, False, False, False,
-                "none", 6,
+                preserve_meta, not args.no_structure, input_dir, args.in_place,
+                args.skip_existing, resize_mode, resize_value,
+                args.prefix, args.suffix, args.lossless, args.progressive,
+                args.chroma_420, args.srgb, "none", 6,
             )
             futures[fut] = f
 

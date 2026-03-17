@@ -1,6 +1,6 @@
 # HEICShift
 
-Universal image batch converter with a modern GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF with full metadata preservation.
+Universal image batch converter with a modern GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, AVIF, or TIFF with full metadata preservation.
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -36,7 +36,7 @@ Most image converters get the details wrong — they strip metadata, mangle colo
 | Camera RAW | `.cr2` `.cr3` `.nef` `.arw` `.dng` `.orf` `.rw2` `.raf` | rawpy/libraw | Auto (optional) |
 | QOI | `.qoi` | qoi | Auto (optional) |
 
-**Output formats:** JPEG, PNG, WebP, TIFF
+**Output formats:** JPEG, PNG, WebP, AVIF, TIFF
 
 Optional decoders are installed automatically on first launch. If installation fails (e.g. no compiler for rawpy), those formats are skipped gracefully and the app logs which are unavailable.
 
@@ -45,7 +45,9 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Auto format detection** — JPEG for photos, PNG when alpha channel is present
 - **12+ input formats** — JPEG, PNG, HEIC, AVIF, WebP, JXL, RAW, TIFF, BMP, JP2, QOI, ICO
 - **Cross-format conversion** — convert between any formats (JPEG to WebP, PNG to JPEG, etc.); same-format no-ops auto-skipped
-- **CLI mode** — headless conversion via `--input` flag for scripting and automation
+- **AVIF output** — next-gen AV1 codec via Pillow's native encoder, best compression ratio
+- **CSV export** — structured conversion report with per-file status, sizes, timing, and warnings
+- **CLI mode** — headless conversion via `--input` flag with full feature parity (all GUI options exposed as flags)
 - **In-place conversion** — convert next to the original and delete the source file
 - **Atomic writes** — in-place mode uses temp file + atomic rename for crash-safe conversion
 - **Output validation** — verifies file exists, size > 0, and passes integrity check before accepting
@@ -60,7 +62,7 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Conversion speed stats** — elapsed time + files/sec displayed in status bar during conversion
 - **Log context menu** — right-click for Copy Selection, Copy All, Open File Location
 - **Source/output overlap guard** — prevents output directory from overwriting source files
-- **Drag & drop** — drop a folder onto the window to set the source directory
+- **Drag & drop** — drop folders or individual image files onto the window
 - **Format filter** — per-family checkboxes to include or exclude input formats from scanning
 - **Skip existing** — resume interrupted batches by skipping files where output already exists
 - **EXIF auto-rotate** — applies orientation from EXIF metadata before saving (prevents double-rotation)
@@ -77,7 +79,7 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Parallel conversion** — 1–32 workers via ThreadPoolExecutor
 - **Recursive scanning** — processes entire directory trees
 - **Folder structure preservation** — mirrors source layout in output (optional)
-- **Quality control** — adjustable slider (50–100) for JPEG/WebP
+- **Quality control** — adjustable slider (50–100) for JPEG/WebP/AVIF
 - **Scan breakdown** — shows count per format family after scanning
 - **Live stats** — files found, total size, converted, skipped, failed, space saved
 - **Progress ETA** — shows current filename and estimated time remaining
@@ -110,7 +112,7 @@ Toggle **"Convert in place"** to save output next to each source file and delete
 
 Enable **"Skip files that already have output"** to resume interrupted batches without re-converting.
 
-The log panel shows per-file results with size before/after and conversion time. Logs can be exported to a text file.
+The log panel shows per-file results with size before/after and conversion time. Logs can be exported to a text file or CSV report.
 
 ## CLI Usage
 
@@ -132,6 +134,12 @@ python heicshift.py --input ./photos --in-place
 # Strip metadata and resize
 python heicshift.py --input ./photos --strip-metadata --resize max_dim:1920
 
+# Convert to AVIF with sRGB color conversion
+python heicshift.py --input ./photos --format avif --srgb
+
+# Progressive JPEG with filename prefix, skip already-converted
+python heicshift.py -i ./photos -f jpeg --progressive --prefix "web_" --skip-existing
+
 # Print version
 python heicshift.py --version
 ```
@@ -142,7 +150,7 @@ python heicshift.py --version
 |---|---|
 | `-i`, `--input` | Source directory (enables CLI mode) |
 | `-o`, `--output` | Output directory (default: `<input>/converted`) |
-| `-f`, `--format` | Output format: `auto`, `jpeg`, `png`, `webp`, `tiff` |
+| `-f`, `--format` | Output format: `auto`, `jpeg`, `png`, `webp`, `avif`, `tiff` |
 | `-q`, `--quality` | JPEG/WebP quality 50–100 (default: 92) |
 | `-w`, `--workers` | Parallel worker count (default: min(cpu_count, 8)) |
 | `--in-place` | Convert next to originals, delete source |
@@ -151,6 +159,14 @@ python heicshift.py --version
 | `--dry-run` | List files and exit without converting |
 | `--strip-metadata` | Remove all EXIF/ICC/XMP from output |
 | `--resize` | Resize by max dimension, e.g. `max_dim:1920` |
+| `--skip-existing` | Skip files where output already exists |
+| `--progressive` | Save JPEGs as progressive |
+| `--chroma-420` | Use 4:2:0 chroma subsampling for JPEG |
+| `--lossless` | Save WebP in lossless mode |
+| `--srgb` | Convert embedded ICC profiles to sRGB |
+| `--prefix` | Prepend text to output filenames |
+| `--suffix` | Append text to output filenames |
+| `--no-structure` | Flatten output (no subdirectory mirroring) |
 | `--version` | Print version and exit |
 
 **Exit codes:** 0 = all OK, 1 = partial failure, 2 = total failure or bad input.
