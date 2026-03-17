@@ -1,5 +1,5 @@
 """
-HEICShift v1.0.0 - High-performance HEIC batch converter
+HEICShift v1.1.0 - High-performance HEIC batch converter
 Scans directories recursively and converts .HEIC/.HEIF files to JPEG or PNG.
 Auto-detects optimal format: PNG for images with transparency, JPEG for photos.
 Preserves EXIF metadata, ICC color profiles, and XMP data.
@@ -7,7 +7,7 @@ Preserves EXIF metadata, ICC color profiles, and XMP data.
 
 import sys, os, subprocess, importlib
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -271,6 +271,7 @@ class ConvertResult:
     size_before: int = 0
     size_after: int = 0
     elapsed: float = 0.0
+    src_deleted: bool = False
 
 @dataclass
 class ScanResult:
@@ -313,6 +314,7 @@ def convert_file(
     preserve_metadata: bool = True,
     preserve_structure: bool = False,
     base_dir: Path | None = None,
+    in_place: bool = False,
 ) -> ConvertResult:
     """Convert a single HEIC file. Thread-safe."""
     t0 = time.perf_counter()
@@ -338,8 +340,10 @@ def convert_file(
         ext_map = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "TIFF": ".tiff"}
         ext = ext_map.get(out_fmt, ".jpg")
 
-        # Build output path
-        if preserve_structure and base_dir:
+        # Build output path — in-place writes next to the source file
+        if in_place:
+            dest_dir = src.parent
+        elif preserve_structure and base_dir:
             rel = src.parent.relative_to(base_dir)
             dest_dir = output_dir / rel
         else:
@@ -381,10 +385,16 @@ def convert_file(
             save_kwargs["method"] = 4
 
         img.save(str(out_path), out_fmt, **save_kwargs)
+        img.close()
 
         result.dst = out_path
         result.size_after = out_path.stat().st_size
         result.success = True
+
+        # In-place mode: delete the original HEIC after successful conversion
+        if in_place and result.success:
+            src.unlink()
+            result.src_deleted = True
 
     except Exception as e:
         result.error = str(e)
@@ -402,7 +412,7 @@ class ConvertWorker(QThread):
     log = pyqtSignal(str)
 
     def __init__(self, files, output_dir, fmt, quality, preserve_meta,
-                 preserve_structure, base_dir, workers):
+                 preserve_structure, base_dir, workers, in_place=False):
         super().__init__()
         self.files = files
         self.output_dir = Path(output_dir)
@@ -412,6 +422,7 @@ class ConvertWorker(QThread):
         self.preserve_structure = preserve_structure
         self.base_dir = base_dir
         self.workers = workers
+        self.in_place = in_place
         self._stop = False
 
     def stop(self):
@@ -433,6 +444,7 @@ class ConvertWorker(QThread):
                     convert_file, f, self.output_dir, self.fmt,
                     self.quality, self.preserve_meta,
                     self.preserve_structure, self.base_dir,
+                    self.in_place,
                 )
                 futures[fut] = f
 
@@ -451,10 +463,11 @@ class ConvertWorker(QThread):
                 if result.success:
                     saved = result.size_before - result.size_after
                     pct = (saved / result.size_before * 100) if result.size_before else 0
+                    deleted_tag = "  [source deleted]" if result.src_deleted else ""
                     self.log.emit(
                         f"[OK] {result.src.name} -> {result.dst.name}  "
                         f"({_fmt_size(result.size_before)} -> {_fmt_size(result.size_after)}, "
-                        f"{pct:+.1f}%)  [{result.elapsed:.2f}s]"
+                        f"{pct:+.1f}%)  [{result.elapsed:.2f}s]{deleted_tag}"
                     )
                 else:
                     self.log.emit(f"[FAIL] {result.src.name}: {result.error}")
@@ -557,6 +570,12 @@ class MainWindow(QMainWindow):
         self.structure_chk = QCheckBox("Preserve folder structure in output")
         self.structure_chk.setChecked(True)
         io_grid.addWidget(self.structure_chk, 2, 2)
+
+        self.inplace_chk = QCheckBox("Convert in place (save next to original, delete HEIC)")
+        self.inplace_chk.setChecked(False)
+        self.inplace_chk.setStyleSheet(f"color: {CAT['peach']};")
+        self.inplace_chk.toggled.connect(self._on_inplace_toggled)
+        io_grid.addWidget(self.inplace_chk, 3, 1, 1, 2)
 
         root.addWidget(io_group)
 
@@ -681,6 +700,16 @@ class MainWindow(QMainWindow):
     def _log(self, msg: str):
         self.log_view.appendPlainText(msg)
 
+    # ── In-place toggle ──
+    def _on_inplace_toggled(self, checked: bool):
+        self.dst_edit.setEnabled(not checked)
+        self.dst_btn.setEnabled(not checked)
+        self.structure_chk.setEnabled(not checked)
+        if checked:
+            self.dst_edit.setPlaceholderText("(disabled — output goes next to each source file)")
+        else:
+            self.dst_edit.setPlaceholderText("Converted files go here (default: source/converted)")
+
     # ── Browse ──
     def _browse_source(self):
         d = QFileDialog.getExistingDirectory(self, "Select Source Directory",
@@ -732,13 +761,18 @@ class MainWindow(QMainWindow):
         if not self._scan_result or not self._scan_result.files:
             return
 
-        dst = self.dst_edit.text().strip()
-        if not dst:
-            src = self.src_edit.text().strip()
-            dst = str(Path(src) / "converted")
-            self.dst_edit.setText(dst)
+        in_place = self.inplace_chk.isChecked()
 
-        Path(dst).mkdir(parents=True, exist_ok=True)
+        if in_place:
+            # Output dir unused in in-place mode, but we need a valid Path
+            dst = self.src_edit.text().strip()
+        else:
+            dst = self.dst_edit.text().strip()
+            if not dst:
+                src = self.src_edit.text().strip()
+                dst = str(Path(src) / "converted")
+                self.dst_edit.setText(dst)
+            Path(dst).mkdir(parents=True, exist_ok=True)
 
         fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "tiff"}
         fmt = fmt_map.get(self.fmt_combo.currentIndex(), "auto")
@@ -756,6 +790,9 @@ class MainWindow(QMainWindow):
         self.open_output_btn.setEnabled(False)
         self.status_bar.showMessage("Converting...")
 
+        if in_place:
+            self._log(f"In-place mode: converted files saved next to originals, HEIC sources will be deleted")
+
         self._worker = ConvertWorker(
             files=self._scan_result.files,
             output_dir=Path(dst),
@@ -765,6 +802,7 @@ class MainWindow(QMainWindow):
             preserve_structure=self.structure_chk.isChecked(),
             base_dir=Path(self.src_edit.text().strip()),
             workers=self.workers_spin.value(),
+            in_place=in_place,
         )
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self._on_progress)
@@ -800,11 +838,13 @@ class MainWindow(QMainWindow):
 
         ok = sum(1 for r in results if r.success)
         fail = sum(1 for r in results if not r.success)
+        deleted = sum(1 for r in results if r.src_deleted)
         total_time = sum(r.elapsed for r in results)
         saved = sum(r.size_before - r.size_after for r in results if r.success)
 
+        deleted_msg = f", {deleted} HEIC sources deleted" if deleted else ""
         summary = (
-            f"Done! {ok} converted, {fail} failed. "
+            f"Done! {ok} converted, {fail} failed{deleted_msg}. "
             f"Space {'saved' if saved >= 0 else 'added'}: {_fmt_size(abs(saved))}. "
             f"Total processing time: {total_time:.1f}s"
         )
@@ -836,6 +876,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("recursive", self.recursive_chk.isChecked())
         self.settings.setValue("structure", self.structure_chk.isChecked())
         self.settings.setValue("metadata", self.meta_chk.isChecked())
+        self.settings.setValue("inplace", self.inplace_chk.isChecked())
         self.settings.setValue("geometry", self.saveGeometry())
 
     def _restore_state(self):
@@ -855,6 +896,8 @@ class MainWindow(QMainWindow):
             self.structure_chk.setChecked(v == "true" or v is True)
         if (v := self.settings.value("metadata")) is not None:
             self.meta_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("inplace")) is not None:
+            self.inplace_chk.setChecked(v == "true" or v is True)
         if v := self.settings.value("geometry"):
             self.restoreGeometry(v)
 

@@ -21,6 +21,7 @@ python heicshift.py
 
 ## Features
 - Auto-detect format: JPEG for photos, PNG for transparent images
+- **In-place mode**: converts next to the original file and deletes the HEIC source on success
 - EXIF, ICC color profile, and XMP metadata preservation
 - Parallel conversion with configurable worker count
 - Preserves folder structure in output (optional)
@@ -33,12 +34,13 @@ python heicshift.py
 ## Architecture
 - `_bootstrap()` auto-installs deps
 - `scan_directory()` finds HEIC/HEIF files via glob
-- `convert_file()` is thread-safe, handles single file conversion
+- `convert_file()` is thread-safe, handles single file conversion; `in_place=True` saves to source dir and deletes original
 - `ScanWorker(QThread)` scans in background
 - `ConvertWorker(QThread)` manages ThreadPoolExecutor for parallel conversion
 - GUI updates via pyqtSignal
 
 ## Version
+- v1.1.0 — Add in-place conversion mode (convert next to source, delete HEIC)
 - v1.0.0 — Initial release
 
 ## Gotchas
