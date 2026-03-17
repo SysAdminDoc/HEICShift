@@ -43,17 +43,24 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Auto format detection** — JPEG for photos, PNG when alpha channel is present
 - **10+ input formats** — HEIC, AVIF, WebP, JXL, RAW, TIFF, BMP, JP2, QOI, ICO
 - **In-place conversion** — convert next to the original and delete the source file
+- **Drag & drop** — drop a folder onto the window to set the source directory
+- **Format filter** — per-family checkboxes to include or exclude input formats from scanning
+- **Skip existing** — resume interrupted batches by skipping files where output already exists
+- **EXIF auto-rotate** — applies orientation from EXIF metadata before saving (prevents double-rotation)
 - **Metadata preservation** — EXIF, ICC color profiles, XMP
 - **Parallel conversion** — 1–32 workers via ThreadPoolExecutor
 - **Recursive scanning** — processes entire directory trees
 - **Folder structure preservation** — mirrors source layout in output (optional)
 - **Quality control** — adjustable slider (50–100) for JPEG/WebP
 - **Scan breakdown** — shows count per format family after scanning
-- **Live stats** — files found, total size, converted, failed, space saved
-- **Embedded log** — per-file results with timing and size delta
+- **Live stats** — files found, total size, converted, skipped, failed, space saved
+- **Progress ETA** — shows current filename and estimated time remaining
+- **Completion notification** — system tray balloon when batch finishes
+- **Embedded log** — per-file results with timing and size delta, export to file or clear
 - **Cancel support** — stop mid-conversion without corrupting output
-- **Settings persistence** — remembers paths, format, quality, workers across sessions
+- **Settings persistence** — remembers all settings including format filter state across sessions
 - **Catppuccin Mocha dark theme**
+- **Cross-platform** — native file manager integration on Windows, macOS, and Linux
 
 ## Installation
 
@@ -67,14 +74,17 @@ All dependencies install automatically on first launch. No manual setup.
 
 ## Usage
 
-1. **Browse** to a directory containing image files
-2. **Scan** to discover all supported files (recursive by default)
-3. **Adjust settings** — format, quality, workers, metadata toggle
-4. **Convert All** — output goes to `source/converted/` by default
+1. **Browse** or **drag & drop** a directory containing image files
+2. **Filter** which input formats to include (optional — all enabled by default)
+3. **Scan** to discover all supported files (recursive by default)
+4. **Adjust settings** — format, quality, workers, metadata toggle
+5. **Convert All** — output goes to `source/converted/` by default
 
 Toggle **"Convert in place"** to save output next to each source file and delete the original.
 
-The log panel shows per-file results with size before/after and conversion time.
+Enable **"Skip files that already have output"** to resume interrupted batches without re-converting.
+
+The log panel shows per-file results with size before/after and conversion time. Logs can be exported to a text file.
 
 ## How It Works
 

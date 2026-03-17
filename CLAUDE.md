@@ -23,6 +23,10 @@ python heicshift.py
 # Optional deps auto-install: rawpy, pillow-jxl-plugin, qoi
 ```
 
+## CI/CD
+- `.github/workflows/build.yml` — PyInstaller builds (Windows/macOS/Linux)
+- Trigger via `workflow_dispatch`, optional version input creates a GitHub release
+
 ## Supported Input Formats
 | Format | Extensions | Decoder | Required |
 |---|---|---|---|
@@ -40,27 +44,40 @@ python heicshift.py
 ## Features
 - Auto-detect format: JPEG for photos, PNG for transparent images
 - **In-place mode**: converts next to the original file and deletes source on success
+- **Drag & drop**: drop a folder onto the window to set source directory
+- **Format filter**: per-family checkboxes to include/exclude input formats from scanning
+- **Skip existing**: resume interrupted batches by skipping files with existing output
+- **EXIF auto-rotate**: applies orientation from EXIF before saving (prevents double-rotation)
 - EXIF, ICC color profile, and XMP metadata preservation
 - Parallel conversion with configurable worker count
 - Preserves folder structure in output (optional)
 - Name collision handling
 - JPEG 4:4:4 chroma subsampling for maximum color fidelity
 - Scan breakdown by format family
+- Progress bar shows current filename + ETA
+- System tray notification on batch completion
+- Export log to file / Clear log buttons
 - Startup log shows which optional formats are available
-- Settings persistence via QSettings
-- Embedded log panel, stats dashboard
+- Settings persistence via QSettings (including format filter state)
+- Embedded log panel, stats dashboard (with skipped count)
 - Cancel support mid-conversion
+- Cross-platform file manager open (Windows/macOS/Linux)
+- App icon generated programmatically
 
 ## Architecture
 - `_bootstrap()` auto-installs required + optional deps
+- `FORMAT_FAMILIES` dict maps family name → (extension set, availability flag)
 - `get_supported_extensions()` dynamically builds extension set based on available deps
 - `_open_image()` routes to correct decoder: rawpy for RAW, qoi for QOI, Pillow+plugins for everything else
-- `convert_file()` is thread-safe; `in_place=True` saves to source dir and deletes original
-- `ScanWorker(QThread)` scans in background
-- `ConvertWorker(QThread)` manages ThreadPoolExecutor for parallel conversion
+- `convert_file()` is thread-safe; `in_place=True` saves to source dir and deletes original; `skip_existing=True` skips if output exists
+- `ScanWorker(QThread)` scans in background, accepts filtered extension set
+- `ConvertWorker(QThread)` manages ThreadPoolExecutor for parallel conversion, emits `current_file` signal
 - GUI updates via pyqtSignal
+- `_open_path()` cross-platform folder opener (os.startfile / open / xdg-open)
+- `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.1.0 — Drag & drop, format filter, skip existing, EXIF auto-rotate, ETA progress, tray notifications, log export/clear, cross-platform open, PyInstaller CI/CD
 - v2.0.0 — Universal converter: add AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JP2, QOI, ICO support
 - v1.1.0 — Add in-place conversion mode (convert next to source, delete HEIC)
 - v1.0.0 — Initial release
@@ -72,3 +89,5 @@ python heicshift.py
 - RAW files: metadata (EXIF) not preserved — rawpy does a full demosaic, no EXIF passthrough
 - QOI files: no metadata to preserve (format doesn't support it)
 - Optional deps fail gracefully — those formats are excluded from scanning, logged on startup
+- EXIF auto-rotate uses `ImageOps.exif_transpose()` — refreshes EXIF bytes from transposed image to strip orientation tag
+- Format filter state persisted as JSON in QSettings

@@ -1,14 +1,14 @@
 """
-HEICShift v2.0.0 - High-performance image batch converter
+HEICShift v2.1.0 - High-performance image batch converter
 Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, RAW,
 TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF.
 Auto-detects optimal format: PNG for images with transparency, JPEG for photos.
 Preserves EXIF metadata, ICC color profiles, and XMP data.
 """
 
-import sys, os, subprocess, importlib
+import sys, os, subprocess, importlib, platform
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -61,7 +61,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, ImageOps
 from pillow_heif import register_heif_opener
 
 register_heif_opener()
@@ -91,17 +91,18 @@ except ImportError:
     pass
 
 from PyQt6.QtCore import (
-    Qt, QThread, pyqtSignal, QTimer, QSettings, QSize,
+    Qt, QThread, pyqtSignal, QTimer, QSettings, QSize, QUrl,
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QAction,
+    QDragEnterEvent, QDropEvent,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFileDialog, QComboBox, QSpinBox, QSlider,
     QProgressBar, QPlainTextEdit, QCheckBox, QGroupBox, QGridLayout,
     QFrame, QSplitter, QStatusBar, QMessageBox, QLineEdit, QStyle,
-    QSizePolicy, QSystemTrayIcon,
+    QSizePolicy, QSystemTrayIcon, QMenu,
 )
 
 # ── Catppuccin Mocha Palette ──────────────────────────────────────────────────
@@ -324,6 +325,20 @@ JXL_EXTS = {".jxl"}
 RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".raf"}
 QOI_EXTS = {".qoi"}
 
+# Family name -> (extension set, availability flag)
+FORMAT_FAMILIES = {
+    "HEIC/HEIF":   (HEIC_EXTS, True),
+    "AVIF":        (AVIF_EXTS, True),
+    "WebP":        (WEBP_EXTS, True),
+    "TIFF":        (TIFF_EXTS, True),
+    "BMP":         (BMP_EXTS, True),
+    "JPEG 2000":   (JP2_EXTS, True),
+    "ICO/CUR":     (ICO_EXTS, True),
+    "JPEG XL":     (JXL_EXTS, HAS_JXL),
+    "Camera RAW":  (RAW_EXTS, HAS_RAWPY),
+    "QOI":         (QOI_EXTS, HAS_QOI),
+}
+
 
 def get_supported_extensions() -> set[str]:
     """Return all input extensions we can currently decode."""
@@ -356,6 +371,7 @@ class ConvertResult:
     src: Path
     dst: Path | None = None
     success: bool = False
+    skipped: bool = False
     error: str = ""
     size_before: int = 0
     size_after: int = 0
@@ -371,10 +387,10 @@ class ScanResult:
 
 # ── Conversion Engine ─────────────────────────────────────────────────────────
 
-def scan_directory(root: Path, recursive: bool = True) -> ScanResult:
+def scan_directory(root: Path, recursive: bool = True, extensions: set[str] | None = None) -> ScanResult:
     """Find all supported image files in directory."""
     t0 = time.perf_counter()
-    supported = get_supported_extensions()
+    supported = extensions or get_supported_extensions()
     result = ScanResult()
     pattern = "**/*" if recursive else "*"
     for p in root.glob(pattern):
@@ -439,6 +455,7 @@ def convert_file(
     preserve_structure: bool = False,
     base_dir: Path | None = None,
     in_place: bool = False,
+    skip_existing: bool = False,
 ) -> ConvertResult:
     """Convert a single image file. Thread-safe."""
     t0 = time.perf_counter()
@@ -446,6 +463,14 @@ def convert_file(
 
     try:
         img, meta = _open_image(src)
+
+        # EXIF auto-rotate — apply orientation and strip the tag
+        rotated = ImageOps.exif_transpose(img)
+        if rotated is not None:
+            img = rotated
+            # Refresh EXIF from the transposed image (orientation tag removed)
+            if "exif" in img.info:
+                meta["exif"] = img.info["exif"]
 
         # Determine output format
         if fmt == "auto":
@@ -475,6 +500,15 @@ def convert_file(
 
         dest_dir.mkdir(parents=True, exist_ok=True)
         out_path = dest_dir / (src.stem + ext)
+
+        # Skip if output already exists
+        if skip_existing and out_path.exists():
+            result.skipped = True
+            result.dst = out_path
+            result.size_after = out_path.stat().st_size
+            result.elapsed = time.perf_counter() - t0
+            img.close()
+            return result
 
         # Handle name collisions
         counter = 1
@@ -524,16 +558,18 @@ def convert_file(
     return result
 
 
-# ── Worker Thread ─────────────────────────────────────────────────────────────
+# ── Worker Threads ───────────────────────────────────────────────────────────
 
 class ConvertWorker(QThread):
     progress = pyqtSignal(int, int)       # current, total
+    current_file = pyqtSignal(str)        # filename currently processing
     file_done = pyqtSignal(object)        # ConvertResult
     finished_all = pyqtSignal(list)        # list[ConvertResult]
     log = pyqtSignal(str)
 
     def __init__(self, files, output_dir, fmt, quality, preserve_meta,
-                 preserve_structure, base_dir, workers, in_place=False):
+                 preserve_structure, base_dir, workers, in_place=False,
+                 skip_existing=False):
         super().__init__()
         self.files = files
         self.output_dir = Path(output_dir)
@@ -544,6 +580,7 @@ class ConvertWorker(QThread):
         self.base_dir = base_dir
         self.workers = workers
         self.in_place = in_place
+        self.skip_existing = skip_existing
         self._stop = False
 
     def stop(self):
@@ -565,7 +602,7 @@ class ConvertWorker(QThread):
                     convert_file, f, self.output_dir, self.fmt,
                     self.quality, self.preserve_meta,
                     self.preserve_structure, self.base_dir,
-                    self.in_place,
+                    self.in_place, self.skip_existing,
                 )
                 futures[fut] = f
 
@@ -579,9 +616,12 @@ class ConvertWorker(QThread):
                 results.append(result)
                 done += 1
                 self.progress.emit(done, total)
+                self.current_file.emit(result.src.name)
                 self.file_done.emit(result)
 
-                if result.success:
+                if result.skipped:
+                    self.log.emit(f"[SKIP] {result.src.name} — output already exists")
+                elif result.success:
                     saved = result.size_before - result.size_after
                     pct = (saved / result.size_before * 100) if result.size_before else 0
                     deleted_tag = "  [source deleted]" if result.src_deleted else ""
@@ -600,14 +640,15 @@ class ScanWorker(QThread):
     finished = pyqtSignal(object)  # ScanResult
     log = pyqtSignal(str)
 
-    def __init__(self, directory, recursive):
+    def __init__(self, directory, recursive, extensions=None):
         super().__init__()
         self.directory = Path(directory)
         self.recursive = recursive
+        self.extensions = extensions
 
     def run(self):
         self.log.emit(f"Scanning {'recursively' if self.recursive else ''}: {self.directory}")
-        result = scan_directory(self.directory, self.recursive)
+        result = scan_directory(self.directory, self.recursive, self.extensions)
         self.log.emit(
             f"Found {len(result.files)} supported files "
             f"({_fmt_size(result.total_size)}) in {result.elapsed:.2f}s"
@@ -625,6 +666,44 @@ def _fmt_size(b: int) -> str:
     return f"{b:.1f} TB"
 
 
+def _fmt_eta(seconds: float) -> str:
+    """Format seconds as human-readable ETA string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
+
+
+def _open_path(path: str):
+    """Open a file/folder in the native file manager (cross-platform)."""
+    if platform.system() == "Windows":
+        os.startfile(path)
+    elif platform.system() == "Darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
+def _create_app_icon() -> QIcon:
+    """Create a simple app icon programmatically."""
+    pm = QPixmap(64, 64)
+    pm.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor(CAT["blue"]))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(2, 2, 60, 60, 14, 14)
+    p.setPen(QColor(CAT["crust"]))
+    f = QFont("Segoe UI", 30, QFont.Weight.Bold)
+    p.setFont(f)
+    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "H")
+    p.end()
+    return QIcon(pm)
+
+
 # ── Main Window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -632,12 +711,20 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"HEICShift v{APP_VERSION}")
         self.setMinimumSize(780, 700)
-        self.resize(900, 780)
+        self.resize(900, 800)
+        self.setAcceptDrops(True)
+
+        self._icon = _create_app_icon()
+        self.setWindowIcon(self._icon)
 
         self.settings = QSettings("HEICShift", "HEICShift")
         self._scan_result: ScanResult | None = None
         self._worker: ConvertWorker | None = None
         self._results: list[ConvertResult] = []
+        self._convert_start_time: float = 0.0
+
+        # System tray for completion notifications
+        self._tray = QSystemTrayIcon(self._icon, self)
 
         self._build_ui()
         self._restore_state()
@@ -688,7 +775,7 @@ class MainWindow(QMainWindow):
 
         io_grid.addWidget(QLabel("Source:"), 0, 0)
         self.src_edit = QLineEdit()
-        self.src_edit.setPlaceholderText("Select a directory containing image files...")
+        self.src_edit.setPlaceholderText("Select or drag & drop a directory containing image files...")
         io_grid.addWidget(self.src_edit, 0, 1)
         self.src_btn = QPushButton("Browse")
         self.src_btn.clicked.connect(self._browse_source)
@@ -717,6 +804,30 @@ class MainWindow(QMainWindow):
         io_grid.addWidget(self.inplace_chk, 3, 1, 1, 2)
 
         root.addWidget(io_group)
+
+        # ── Input Format Filter ──
+        filter_group = QGroupBox("Input Format Filter")
+        filter_layout = QGridLayout(filter_group)
+        filter_layout.setSpacing(6)
+
+        self._format_filters: dict[str, QCheckBox] = {}
+        col = 0
+        row = 0
+        for name, (exts, available) in FORMAT_FAMILIES.items():
+            chk = QCheckBox(name)
+            chk.setChecked(available)
+            chk.setEnabled(available)
+            if not available:
+                chk.setToolTip(f"{name} decoder not installed")
+                chk.setStyleSheet(f"color: {CAT['overlay0']};")
+            self._format_filters[name] = chk
+            filter_layout.addWidget(chk, row, col)
+            col += 1
+            if col > 4:
+                col = 0
+                row += 1
+
+        root.addWidget(filter_group)
 
         # ── Conversion Options ──
         opt_group = QGroupBox("Conversion Settings")
@@ -752,6 +863,11 @@ class MainWindow(QMainWindow):
         self.meta_chk = QCheckBox("Preserve EXIF / ICC / XMP metadata")
         self.meta_chk.setChecked(True)
         opt_grid.addWidget(self.meta_chk, 2, 2, 1, 2)
+
+        self.skip_existing_chk = QCheckBox("Skip files that already have output")
+        self.skip_existing_chk.setChecked(False)
+        self.skip_existing_chk.setToolTip("Resume interrupted batches — skip files where output already exists")
+        opt_grid.addWidget(self.skip_existing_chk, 3, 0, 1, 4)
 
         root.addWidget(opt_group)
 
@@ -794,10 +910,12 @@ class MainWindow(QMainWindow):
         self.stat_files = self._make_stat("0", "Files Found")
         self.stat_size = self._make_stat("0 B", "Total Size")
         self.stat_done = self._make_stat("0", "Converted")
+        self.stat_skipped = self._make_stat("0", "Skipped")
         self.stat_failed = self._make_stat("0", "Failed")
         self.stat_saved = self._make_stat("0 B", "Space Saved")
 
-        for w in [self.stat_files, self.stat_size, self.stat_done, self.stat_failed, self.stat_saved]:
+        for w in [self.stat_files, self.stat_size, self.stat_done,
+                  self.stat_skipped, self.stat_failed, self.stat_saved]:
             stats_layout.addWidget(w)
 
         root.addWidget(stats_frame)
@@ -808,7 +926,27 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         root.addWidget(self.progress_bar)
 
-        # ── Log ──
+        # ── Log + controls ──
+        log_header = QHBoxLayout()
+        log_label = QLabel("Log")
+        log_label.setStyleSheet(f"color: {CAT['overlay1']}; font-weight: 600; font-size: 12px;")
+        log_header.addWidget(log_label)
+        log_header.addStretch()
+
+        self.export_log_btn = QPushButton("Export Log")
+        self.export_log_btn.setFixedHeight(24)
+        self.export_log_btn.setStyleSheet("font-size: 11px; padding: 2px 10px;")
+        self.export_log_btn.clicked.connect(self._export_log)
+        log_header.addWidget(self.export_log_btn)
+
+        self.clear_log_btn = QPushButton("Clear")
+        self.clear_log_btn.setFixedHeight(24)
+        self.clear_log_btn.setStyleSheet("font-size: 11px; padding: 2px 10px;")
+        self.clear_log_btn.clicked.connect(self._clear_log)
+        log_header.addWidget(self.clear_log_btn)
+
+        root.addLayout(log_header)
+
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
@@ -839,6 +977,25 @@ class MainWindow(QMainWindow):
     def _log(self, msg: str):
         self.log_view.appendPlainText(msg)
 
+    # ── Drag & Drop ──
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile() and Path(url.toLocalFile()).is_dir():
+                    event.acceptProposedAction()
+                    return
+
+    def dropEvent(self, event: QDropEvent):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if Path(path).is_dir():
+                self.src_edit.setText(path)
+                if not self.dst_edit.text() and not self.inplace_chk.isChecked():
+                    self.dst_edit.setText(str(Path(path) / "converted"))
+                self._log(f"Source set via drag & drop: {path}")
+                event.acceptProposedAction()
+                return
+
     # ── In-place toggle ──
     def _on_inplace_toggled(self, checked: bool):
         self.dst_edit.setEnabled(not checked)
@@ -864,6 +1021,29 @@ class MainWindow(QMainWindow):
         if d:
             self.dst_edit.setText(d)
 
+    # ── Format filter ──
+    def _get_enabled_extensions(self) -> set[str]:
+        """Build extension set from checked format filter checkboxes."""
+        exts = set()
+        for name, chk in self._format_filters.items():
+            if chk.isChecked() and chk.isEnabled():
+                family_exts, _ = FORMAT_FAMILIES[name]
+                exts |= family_exts
+        return exts
+
+    # ── Log controls ──
+    def _export_log(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Log", str(Path.home() / "heicshift_log.txt"),
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if path:
+            Path(path).write_text(self.log_view.toPlainText(), encoding="utf-8")
+            self._log(f"Log exported to {path}")
+
+    def _clear_log(self):
+        self.log_view.clear()
+
     # ── Scan ──
     def _scan(self):
         src = self.src_edit.text().strip()
@@ -875,7 +1055,14 @@ class MainWindow(QMainWindow):
         self.convert_btn.setEnabled(False)
         self.status_bar.showMessage("Scanning...")
 
-        self._scanner = ScanWorker(src, self.recursive_chk.isChecked())
+        enabled_exts = self._get_enabled_extensions()
+        if not enabled_exts:
+            self._log("[ERROR] No input formats selected in the filter panel.")
+            self.scan_btn.setEnabled(True)
+            self.status_bar.showMessage("Ready")
+            return
+
+        self._scanner = ScanWorker(src, self.recursive_chk.isChecked(), enabled_exts)
         self._scanner.log.connect(self._log)
         self._scanner.finished.connect(self._on_scan_done)
         self._scanner.start()
@@ -942,9 +1129,11 @@ class MainWindow(QMainWindow):
         fmt = fmt_map.get(self.fmt_combo.currentIndex(), "auto")
 
         self._results = []
+        self._convert_start_time = time.perf_counter()
         self.progress_bar.setValue(0)
         self.progress_bar.setMaximum(len(self._scan_result.files))
         self.stat_done._val.setText("0")
+        self.stat_skipped._val.setText("0")
         self.stat_failed._val.setText("0")
         self.stat_saved._val.setText("0 B")
 
@@ -967,24 +1156,40 @@ class MainWindow(QMainWindow):
             base_dir=Path(self.src_edit.text().strip()),
             workers=self.workers_spin.value(),
             in_place=in_place,
+            skip_existing=self.skip_existing_chk.isChecked(),
         )
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self._on_progress)
+        self._worker.current_file.connect(self._on_current_file)
         self._worker.file_done.connect(self._on_file_done)
         self._worker.finished_all.connect(self._on_convert_done)
         self._worker.start()
 
     def _on_progress(self, current, total):
         self.progress_bar.setValue(current)
-        self.status_bar.showMessage(f"Converting... {current}/{total}")
+        elapsed = time.perf_counter() - self._convert_start_time
+        if current > 0 and current < total:
+            rate = elapsed / current
+            remaining = (total - current) * rate
+            eta = _fmt_eta(remaining)
+            self.status_bar.showMessage(f"Converting... {current}/{total} — ETA: {eta}")
+        else:
+            self.status_bar.showMessage(f"Converting... {current}/{total}")
+
+    def _on_current_file(self, filename: str):
+        self.progress_bar.setFormat(f"%p% — {filename}")
 
     def _on_file_done(self, result: ConvertResult):
         self._results.append(result)
         ok = sum(1 for r in self._results if r.success)
-        fail = sum(1 for r in self._results if not r.success)
+        skipped = sum(1 for r in self._results if r.skipped)
+        fail = sum(1 for r in self._results if not r.success and not r.skipped)
         saved = sum(r.size_before - r.size_after for r in self._results if r.success)
 
         self.stat_done._val.setText(str(ok))
+        self.stat_skipped._val.setText(str(skipped))
+        if skipped:
+            self.stat_skipped._val.setStyleSheet(f"color: {CAT['yellow']}; font-size: 22px; font-weight: 700;")
         self.stat_failed._val.setText(str(fail))
         if fail:
             self.stat_failed._val.setStyleSheet(f"color: {CAT['red']}; font-size: 22px; font-weight: 700;")
@@ -999,16 +1204,24 @@ class MainWindow(QMainWindow):
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.open_output_btn.setEnabled(True)
+        self.progress_bar.setFormat("%p%")
 
         ok = sum(1 for r in results if r.success)
-        fail = sum(1 for r in results if not r.success)
+        skipped = sum(1 for r in results if r.skipped)
+        fail = sum(1 for r in results if not r.success and not r.skipped)
         deleted = sum(1 for r in results if r.src_deleted)
         total_time = sum(r.elapsed for r in results)
         saved = sum(r.size_before - r.size_after for r in results if r.success)
 
-        deleted_msg = f", {deleted} sources deleted" if deleted else ""
+        parts = [f"{ok} converted"]
+        if skipped:
+            parts.append(f"{skipped} skipped")
+        if fail:
+            parts.append(f"{fail} failed")
+        if deleted:
+            parts.append(f"{deleted} sources deleted")
         summary = (
-            f"Done! {ok} converted, {fail} failed{deleted_msg}. "
+            f"Done! {', '.join(parts)}. "
             f"Space {'saved' if saved >= 0 else 'added'}: {_fmt_size(abs(saved))}. "
             f"Total processing time: {total_time:.1f}s"
         )
@@ -1016,6 +1229,17 @@ class MainWindow(QMainWindow):
         self._log(summary)
         self._log(f"{'='*60}")
         self.status_bar.showMessage(summary)
+
+        # System tray notification
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray.show()
+            self._tray.showMessage(
+                "HEICShift — Conversion Complete",
+                f"{ok} converted, {fail} failed" + (f", {skipped} skipped" if skipped else ""),
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+            QTimer.singleShot(6000, self._tray.hide)
 
         self._save_state()
 
@@ -1026,9 +1250,12 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Stopping...")
 
     def _open_output(self):
-        dst = self.dst_edit.text().strip()
-        if dst and Path(dst).exists():
-            os.startfile(dst)
+        if self.inplace_chk.isChecked():
+            path = self.src_edit.text().strip()
+        else:
+            path = self.dst_edit.text().strip()
+        if path and Path(path).exists():
+            _open_path(path)
 
     # ── State persistence ──
     def _save_state(self):
@@ -1041,7 +1268,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue("structure", self.structure_chk.isChecked())
         self.settings.setValue("metadata", self.meta_chk.isChecked())
         self.settings.setValue("inplace", self.inplace_chk.isChecked())
+        self.settings.setValue("skip_existing", self.skip_existing_chk.isChecked())
         self.settings.setValue("geometry", self.saveGeometry())
+        # Format filter states
+        filter_state = {name: chk.isChecked() for name, chk in self._format_filters.items()}
+        self.settings.setValue("format_filters", json.dumps(filter_state))
 
     def _restore_state(self):
         if v := self.settings.value("src"):
@@ -1062,14 +1293,26 @@ class MainWindow(QMainWindow):
             self.meta_chk.setChecked(v == "true" or v is True)
         if (v := self.settings.value("inplace")) is not None:
             self.inplace_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("skip_existing")) is not None:
+            self.skip_existing_chk.setChecked(v == "true" or v is True)
         if v := self.settings.value("geometry"):
             self.restoreGeometry(v)
+        # Restore format filter states
+        if v := self.settings.value("format_filters"):
+            try:
+                saved = json.loads(v)
+                for name, checked in saved.items():
+                    if name in self._format_filters and self._format_filters[name].isEnabled():
+                        self._format_filters[name].setChecked(checked)
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     def closeEvent(self, event):
         self._save_state()
         if self._worker and self._worker.isRunning():
             self._worker.stop()
             self._worker.wait(3000)
+        self._tray.hide()
         super().closeEvent(event)
 
 
@@ -1093,6 +1336,7 @@ def main():
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(CAT["crust"]))
     app.setPalette(palette)
 
+    app.setWindowIcon(_create_app_icon())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
