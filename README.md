@@ -47,6 +47,11 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Format filter** — per-family checkboxes to include or exclude input formats from scanning
 - **Skip existing** — resume interrupted batches by skipping files where output already exists
 - **EXIF auto-rotate** — applies orientation from EXIF metadata before saving (prevents double-rotation)
+- **Image resize** — Max Dimension (px) or Scale (%) with LANCZOS resampling
+- **Filename prefix/suffix** — prepend or append text to output filenames
+- **Progressive JPEG** — optional progressive encoding for web-optimized output
+- **Lossless WebP** — optional lossless mode when WebP is selected as output
+- **Recent directories** — dropdown of last 10 source directories for quick re-access
 - **Metadata preservation** — EXIF, ICC color profiles, XMP
 - **Parallel conversion** — 1–32 workers via ThreadPoolExecutor
 - **Recursive scanning** — processes entire directory trees
@@ -59,7 +64,7 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Embedded log** — per-file results with timing and size delta, export to file or clear
 - **Cancel support** — stop mid-conversion without corrupting output
 - **Settings persistence** — remembers all settings including format filter state across sessions
-- **Catppuccin Mocha dark theme**
+- **Catppuccin Mocha dark theme** — including dark scrollbars
 - **Cross-platform** — native file manager integration on Windows, macOS, and Linux
 
 ## Installation

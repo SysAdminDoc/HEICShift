@@ -48,6 +48,11 @@ python heicshift.py
 - **Format filter**: per-family checkboxes to include/exclude input formats from scanning
 - **Skip existing**: resume interrupted batches by skipping files with existing output
 - **EXIF auto-rotate**: applies orientation from EXIF before saving (prevents double-rotation)
+- **Image resize**: Max Dimension (px) or Scale (%) with LANCZOS resampling
+- **Output filename prefix/suffix**: prepend/append text to output filenames
+- **Progressive JPEG**: optional progressive encoding for web-optimized JPEGs
+- **Lossless WebP**: optional lossless mode for WebP output
+- **Recent directories**: dropdown of last 10 source directories for quick access
 - EXIF, ICC color profile, and XMP metadata preservation
 - Parallel conversion with configurable worker count
 - Preserves folder structure in output (optional)
@@ -62,6 +67,7 @@ python heicshift.py
 - Embedded log panel, stats dashboard (with skipped count)
 - Cancel support mid-conversion
 - Cross-platform file manager open (Windows/macOS/Linux)
+- Dark-themed scrollbars matching Catppuccin Mocha
 - App icon generated programmatically
 
 ## Architecture
@@ -69,7 +75,7 @@ python heicshift.py
 - `FORMAT_FAMILIES` dict maps family name → (extension set, availability flag)
 - `get_supported_extensions()` dynamically builds extension set based on available deps
 - `_open_image()` routes to correct decoder: rawpy for RAW, qoi for QOI, Pillow+plugins for everything else
-- `convert_file()` is thread-safe; `in_place=True` saves to source dir and deletes original; `skip_existing=True` skips if output exists
+- `convert_file()` is thread-safe; supports `in_place`, `skip_existing`, `resize_mode`/`resize_value`, `prefix`/`suffix`, `lossless_webp`, `progressive_jpeg`
 - `ScanWorker(QThread)` scans in background, accepts filtered extension set
 - `ConvertWorker(QThread)` manages ThreadPoolExecutor for parallel conversion, emits `current_file` signal
 - GUI updates via pyqtSignal
@@ -77,6 +83,7 @@ python heicshift.py
 - `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.2.0 — Image resize, filename prefix/suffix, progressive JPEG, lossless WebP, recent directories dropdown, dark scrollbar theming
 - v2.1.0 — Drag & drop, format filter, skip existing, EXIF auto-rotate, ETA progress, tray notifications, log export/clear, cross-platform open, PyInstaller CI/CD
 - v2.0.0 — Universal converter: add AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JP2, QOI, ICO support
 - v1.1.0 — Add in-place conversion mode (convert next to source, delete HEIC)

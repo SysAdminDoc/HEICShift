@@ -1,5 +1,5 @@
 """
-HEICShift v2.1.0 - High-performance image batch converter
+HEICShift v2.2.0 - High-performance image batch converter
 Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, RAW,
 TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF.
 Auto-detects optimal format: PNG for images with transparency, JPEG for photos.
@@ -8,7 +8,7 @@ Preserves EXIF metadata, ICC color profiles, and XMP data.
 
 import sys, os, subprocess, importlib, platform
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -102,7 +102,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QComboBox, QSpinBox, QSlider,
     QProgressBar, QPlainTextEdit, QCheckBox, QGroupBox, QGridLayout,
     QFrame, QSplitter, QStatusBar, QMessageBox, QLineEdit, QStyle,
-    QSizePolicy, QSystemTrayIcon, QMenu,
+    QSizePolicy, QSystemTrayIcon, QMenu, QToolButton,
 )
 
 # ── Catppuccin Mocha Palette ──────────────────────────────────────────────────
@@ -304,6 +304,77 @@ QFrame#separator {{
     background-color: {CAT['surface1']};
     max-height: 1px;
 }}
+QScrollBar:vertical {{
+    background: {CAT['mantle']};
+    width: 10px;
+    margin: 0;
+    border-radius: 5px;
+}}
+QScrollBar::handle:vertical {{
+    background: {CAT['surface2']};
+    min-height: 30px;
+    border-radius: 5px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: {CAT['overlay0']};
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+    background: none;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none;
+}}
+QScrollBar:horizontal {{
+    background: {CAT['mantle']};
+    height: 10px;
+    margin: 0;
+    border-radius: 5px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {CAT['surface2']};
+    min-width: 30px;
+    border-radius: 5px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: {CAT['overlay0']};
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0;
+    background: none;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: none;
+}}
+QToolButton {{
+    background-color: {CAT['surface0']};
+    color: {CAT['text']};
+    border: 1px solid {CAT['surface1']};
+    border-radius: 6px;
+    padding: 6px;
+}}
+QToolButton:hover {{
+    background-color: {CAT['surface1']};
+    border-color: {CAT['lavender']};
+}}
+QToolButton::menu-indicator {{
+    image: none;
+}}
+QMenu {{
+    background-color: {CAT['surface0']};
+    color: {CAT['text']};
+    border: 1px solid {CAT['surface1']};
+    border-radius: 6px;
+    padding: 4px;
+}}
+QMenu::item {{
+    padding: 6px 20px;
+    border-radius: 4px;
+}}
+QMenu::item:selected {{
+    background-color: {CAT['surface1']};
+    color: {CAT['lavender']};
+}}
 """
 
 
@@ -456,6 +527,12 @@ def convert_file(
     base_dir: Path | None = None,
     in_place: bool = False,
     skip_existing: bool = False,
+    resize_mode: str = "none",
+    resize_value: int = 1920,
+    prefix: str = "",
+    suffix: str = "",
+    lossless_webp: bool = False,
+    progressive_jpeg: bool = False,
 ) -> ConvertResult:
     """Convert a single image file. Thread-safe."""
     t0 = time.perf_counter()
@@ -471,6 +548,24 @@ def convert_file(
             # Refresh EXIF from the transposed image (orientation tag removed)
             if "exif" in img.info:
                 meta["exif"] = img.info["exif"]
+
+        # Resize if requested
+        if resize_mode == "max_dim" and resize_value > 0:
+            w, h = img.size
+            if max(w, h) > resize_value:
+                if w >= h:
+                    new_w = resize_value
+                    new_h = max(1, int(h * (resize_value / w)))
+                else:
+                    new_h = resize_value
+                    new_w = max(1, int(w * (resize_value / h)))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        elif resize_mode == "scale" and resize_value != 100:
+            w, h = img.size
+            factor = resize_value / 100
+            new_w = max(1, int(w * factor))
+            new_h = max(1, int(h * factor))
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
         # Determine output format
         if fmt == "auto":
@@ -499,7 +594,8 @@ def convert_file(
             dest_dir = output_dir
 
         dest_dir.mkdir(parents=True, exist_ok=True)
-        out_path = dest_dir / (src.stem + ext)
+        stem = prefix + src.stem + suffix
+        out_path = dest_dir / (stem + ext)
 
         # Skip if output already exists
         if skip_existing and out_path.exists():
@@ -513,7 +609,7 @@ def convert_file(
         # Handle name collisions
         counter = 1
         while out_path.exists():
-            out_path = dest_dir / f"{src.stem}_{counter}{ext}"
+            out_path = dest_dir / f"{stem}_{counter}{ext}"
             counter += 1
 
         # Gather metadata
@@ -533,10 +629,15 @@ def convert_file(
             save_kwargs["quality"] = jpeg_quality
             save_kwargs["subsampling"] = 0  # 4:4:4 chroma
             save_kwargs["optimize"] = True
+            if progressive_jpeg:
+                save_kwargs["progressive"] = True
         elif out_fmt == "PNG":
             save_kwargs["optimize"] = True
         elif out_fmt == "WEBP":
-            save_kwargs["quality"] = jpeg_quality
+            if lossless_webp:
+                save_kwargs["lossless"] = True
+            else:
+                save_kwargs["quality"] = jpeg_quality
             save_kwargs["method"] = 4
 
         img.save(str(out_path), out_fmt, **save_kwargs)
@@ -569,7 +670,9 @@ class ConvertWorker(QThread):
 
     def __init__(self, files, output_dir, fmt, quality, preserve_meta,
                  preserve_structure, base_dir, workers, in_place=False,
-                 skip_existing=False):
+                 skip_existing=False, resize_mode="none", resize_value=1920,
+                 prefix="", suffix="", lossless_webp=False,
+                 progressive_jpeg=False):
         super().__init__()
         self.files = files
         self.output_dir = Path(output_dir)
@@ -581,6 +684,12 @@ class ConvertWorker(QThread):
         self.workers = workers
         self.in_place = in_place
         self.skip_existing = skip_existing
+        self.resize_mode = resize_mode
+        self.resize_value = resize_value
+        self.prefix = prefix
+        self.suffix = suffix
+        self.lossless_webp = lossless_webp
+        self.progressive_jpeg = progressive_jpeg
         self._stop = False
 
     def stop(self):
@@ -603,6 +712,9 @@ class ConvertWorker(QThread):
                     self.quality, self.preserve_meta,
                     self.preserve_structure, self.base_dir,
                     self.in_place, self.skip_existing,
+                    self.resize_mode, self.resize_value,
+                    self.prefix, self.suffix,
+                    self.lossless_webp, self.progressive_jpeg,
                 )
                 futures[fut] = f
 
@@ -781,6 +893,16 @@ class MainWindow(QMainWindow):
         self.src_btn.clicked.connect(self._browse_source)
         io_grid.addWidget(self.src_btn, 0, 2)
 
+        self.recent_btn = QToolButton()
+        self.recent_btn.setText("▾")
+        self.recent_btn.setFixedWidth(28)
+        self.recent_btn.setToolTip("Recent directories")
+        self._recent_menu = QMenu(self)
+        self.recent_btn.setMenu(self._recent_menu)
+        self.recent_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._recent_menu.aboutToShow.connect(self._populate_recent_menu)
+        io_grid.addWidget(self.recent_btn, 0, 3)
+
         io_grid.addWidget(QLabel("Output:"), 1, 0)
         self.dst_edit = QLineEdit()
         self.dst_edit.setPlaceholderText("Converted files go here (default: source/converted)")
@@ -867,7 +989,49 @@ class MainWindow(QMainWindow):
         self.skip_existing_chk = QCheckBox("Skip files that already have output")
         self.skip_existing_chk.setChecked(False)
         self.skip_existing_chk.setToolTip("Resume interrupted batches — skip files where output already exists")
-        opt_grid.addWidget(self.skip_existing_chk, 3, 0, 1, 4)
+        opt_grid.addWidget(self.skip_existing_chk, 3, 0, 1, 2)
+
+        self.progressive_jpeg_chk = QCheckBox("Progressive JPEG")
+        self.progressive_jpeg_chk.setChecked(False)
+        self.progressive_jpeg_chk.setToolTip("Save JPEGs as progressive (loads top-to-bottom in browsers)")
+        opt_grid.addWidget(self.progressive_jpeg_chk, 3, 2)
+
+        self.lossless_webp_chk = QCheckBox("Lossless WebP")
+        self.lossless_webp_chk.setChecked(False)
+        self.lossless_webp_chk.setToolTip("Save WebP files in lossless mode (larger files, no quality loss)")
+        opt_grid.addWidget(self.lossless_webp_chk, 3, 3)
+
+        # ── Resize ──
+        self.resize_chk = QCheckBox("Resize")
+        self.resize_chk.setChecked(False)
+        self.resize_chk.toggled.connect(self._on_resize_toggled)
+        opt_grid.addWidget(self.resize_chk, 4, 0)
+
+        self.resize_combo = QComboBox()
+        self.resize_combo.addItems(["Max Dimension", "Scale"])
+        self.resize_combo.setEnabled(False)
+        self.resize_combo.currentIndexChanged.connect(self._on_resize_mode_changed)
+        opt_grid.addWidget(self.resize_combo, 4, 1)
+
+        self.resize_spin = QSpinBox()
+        self.resize_spin.setRange(100, 10000)
+        self.resize_spin.setValue(1920)
+        self.resize_spin.setSuffix(" px")
+        self.resize_spin.setEnabled(False)
+        opt_grid.addWidget(self.resize_spin, 4, 2, 1, 2)
+
+        # ── Filename Prefix / Suffix ──
+        opt_grid.addWidget(QLabel("Prefix:"), 5, 0)
+        self.prefix_edit = QLineEdit()
+        self.prefix_edit.setPlaceholderText("e.g. converted_")
+        self.prefix_edit.setMaximumWidth(180)
+        opt_grid.addWidget(self.prefix_edit, 5, 1)
+
+        opt_grid.addWidget(QLabel("Suffix:"), 5, 2)
+        self.suffix_edit = QLineEdit()
+        self.suffix_edit.setPlaceholderText("e.g. _web")
+        self.suffix_edit.setMaximumWidth(180)
+        opt_grid.addWidget(self.suffix_edit, 5, 3)
 
         root.addWidget(opt_group)
 
@@ -992,6 +1156,7 @@ class MainWindow(QMainWindow):
                 self.src_edit.setText(path)
                 if not self.dst_edit.text() and not self.inplace_chk.isChecked():
                     self.dst_edit.setText(str(Path(path) / "converted"))
+                self._add_recent_dir(path)
                 self._log(f"Source set via drag & drop: {path}")
                 event.acceptProposedAction()
                 return
@@ -1014,6 +1179,7 @@ class MainWindow(QMainWindow):
             self.src_edit.setText(d)
             if not self.dst_edit.text():
                 self.dst_edit.setText(str(Path(d) / "converted"))
+            self._add_recent_dir(d)
 
     def _browse_output(self):
         d = QFileDialog.getExistingDirectory(self, "Select Output Directory",
@@ -1030,6 +1196,54 @@ class MainWindow(QMainWindow):
                 family_exts, _ = FORMAT_FAMILIES[name]
                 exts |= family_exts
         return exts
+
+    # ── Recent directories ──
+    def _add_recent_dir(self, path: str):
+        """Add a directory to the recent list (max 10, deduplicated)."""
+        recent = self._get_recent_dirs()
+        if path in recent:
+            recent.remove(path)
+        recent.insert(0, path)
+        self.settings.setValue("recent_dirs", json.dumps(recent[:10]))
+
+    def _get_recent_dirs(self) -> list[str]:
+        raw = self.settings.value("recent_dirs", "[]")
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def _populate_recent_menu(self):
+        self._recent_menu.clear()
+        recent = self._get_recent_dirs()
+        if not recent:
+            action = self._recent_menu.addAction("No recent directories")
+            action.setEnabled(False)
+        else:
+            for path in recent:
+                action = self._recent_menu.addAction(path)
+                action.triggered.connect(lambda checked, p=path: self._set_source_dir(p))
+
+    def _set_source_dir(self, path: str):
+        self.src_edit.setText(path)
+        if not self.dst_edit.text() and not self.inplace_chk.isChecked():
+            self.dst_edit.setText(str(Path(path) / "converted"))
+        self._log(f"Source set from recent: {path}")
+
+    # ── Resize controls ──
+    def _on_resize_toggled(self, checked: bool):
+        self.resize_combo.setEnabled(checked)
+        self.resize_spin.setEnabled(checked)
+
+    def _on_resize_mode_changed(self, idx: int):
+        if idx == 0:  # Max Dimension
+            self.resize_spin.setRange(100, 10000)
+            self.resize_spin.setValue(1920)
+            self.resize_spin.setSuffix(" px")
+        else:  # Scale
+            self.resize_spin.setRange(1, 500)
+            self.resize_spin.setValue(50)
+            self.resize_spin.setSuffix(" %")
 
     # ── Log controls ──
     def _export_log(self):
@@ -1128,6 +1342,10 @@ class MainWindow(QMainWindow):
         fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "tiff"}
         fmt = fmt_map.get(self.fmt_combo.currentIndex(), "auto")
 
+        resize_mode = "none"
+        if self.resize_chk.isChecked():
+            resize_mode = "max_dim" if self.resize_combo.currentIndex() == 0 else "scale"
+
         self._results = []
         self._convert_start_time = time.perf_counter()
         self.progress_bar.setValue(0)
@@ -1157,6 +1375,12 @@ class MainWindow(QMainWindow):
             workers=self.workers_spin.value(),
             in_place=in_place,
             skip_existing=self.skip_existing_chk.isChecked(),
+            resize_mode=resize_mode,
+            resize_value=self.resize_spin.value(),
+            prefix=self.prefix_edit.text(),
+            suffix=self.suffix_edit.text(),
+            lossless_webp=self.lossless_webp_chk.isChecked(),
+            progressive_jpeg=self.progressive_jpeg_chk.isChecked(),
         )
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self._on_progress)
@@ -1269,6 +1493,13 @@ class MainWindow(QMainWindow):
         self.settings.setValue("metadata", self.meta_chk.isChecked())
         self.settings.setValue("inplace", self.inplace_chk.isChecked())
         self.settings.setValue("skip_existing", self.skip_existing_chk.isChecked())
+        self.settings.setValue("progressive_jpeg", self.progressive_jpeg_chk.isChecked())
+        self.settings.setValue("lossless_webp", self.lossless_webp_chk.isChecked())
+        self.settings.setValue("resize_enabled", self.resize_chk.isChecked())
+        self.settings.setValue("resize_mode", self.resize_combo.currentIndex())
+        self.settings.setValue("resize_value", self.resize_spin.value())
+        self.settings.setValue("prefix", self.prefix_edit.text())
+        self.settings.setValue("suffix", self.suffix_edit.text())
         self.settings.setValue("geometry", self.saveGeometry())
         # Format filter states
         filter_state = {name: chk.isChecked() for name, chk in self._format_filters.items()}
@@ -1295,6 +1526,28 @@ class MainWindow(QMainWindow):
             self.inplace_chk.setChecked(v == "true" or v is True)
         if (v := self.settings.value("skip_existing")) is not None:
             self.skip_existing_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("progressive_jpeg")) is not None:
+            self.progressive_jpeg_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("lossless_webp")) is not None:
+            self.lossless_webp_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("resize_enabled")) is not None:
+            self.resize_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("resize_mode")) is not None:
+            self.resize_combo.blockSignals(True)
+            self.resize_combo.setCurrentIndex(int(v))
+            self.resize_combo.blockSignals(False)
+            if int(v) == 0:
+                self.resize_spin.setRange(100, 10000)
+                self.resize_spin.setSuffix(" px")
+            else:
+                self.resize_spin.setRange(1, 500)
+                self.resize_spin.setSuffix(" %")
+        if (v := self.settings.value("resize_value")) is not None:
+            self.resize_spin.setValue(int(v))
+        if (v := self.settings.value("prefix")) is not None:
+            self.prefix_edit.setText(v)
+        if (v := self.settings.value("suffix")) is not None:
+            self.suffix_edit.setText(v)
         if v := self.settings.value("geometry"):
             self.restoreGeometry(v)
         # Restore format filter states
