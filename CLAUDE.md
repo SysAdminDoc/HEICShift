@@ -6,6 +6,7 @@ Universal image batch converter with PyQt6 GUI. Scans directories recursively an
 ## Tech Stack
 - **Language**: Python 3.10+
 - **GUI**: PyQt6 (Fusion style, Catppuccin Mocha theme)
+- **CLI**: argparse (headless mode via `--input` flag)
 - **HEIC/AVIF Decoding**: pillow-heif (registers as Pillow plugin)
 - **JPEG XL**: pillow-jxl-plugin (optional, registers as Pillow plugin)
 - **Camera RAW**: rawpy wrapping libraw (optional)
@@ -18,7 +19,14 @@ Universal image batch converter with PyQt6 GUI. Scans directories recursively an
 
 ## Build / Run
 ```bash
+# GUI mode
 python heicshift.py
+
+# CLI mode
+python heicshift.py --input ./photos --format jpeg --quality 85
+python heicshift.py --input ./photos --dry-run
+python heicshift.py --version
+
 # Required deps auto-install: Pillow, pillow-heif, PyQt6
 # Optional deps auto-install: rawpy, pillow-jxl-plugin, qoi
 ```
@@ -43,9 +51,18 @@ python heicshift.py
 
 ## Features
 - Auto-detect format: JPEG for photos, PNG for transparent images
+- **CLI mode**: headless conversion via `--input` flag with `--dry-run`, `--strip-metadata`, `--resize`, exit codes
 - **In-place mode**: converts next to the original file and deletes source on success
 - **Atomic writes**: in-place mode uses temp file + `os.replace()` for crash-safe conversion
 - **Output validation**: verifies output exists, has size > 0, passes `Image.verify()` before accepting
+- **Disk space pre-check**: blocks conversion if output exceeds available space, warns at 80%
+- **Strip metadata**: option to remove all EXIF/ICC/XMP from output (mutually exclusive with preserve)
+- **Auto-open output folder**: optional auto-open on conversion completion
+- **File count in title bar**: shows file count after scan, progress during conversion, summary on done
+- **Resize upscaling guard**: warns when image is already smaller than resize target
+- **Better error logging**: `ConvertResult.warnings` field, `[WARN]` log lines for sRGB failures, RAW metadata, resize skips
+- **Stats color reset**: stat label colors reset to green on new batch start
+- **Dependency version logging**: Pillow/pillow-heif/PyQt6 + optional dep versions on startup
 - **Drag & drop**: drop a folder onto the window to set source directory
 - **Format filter**: per-family checkboxes to include/exclude input formats from scanning
 - **Skip existing**: resume interrupted batches by skipping files with existing output
@@ -90,8 +107,12 @@ python heicshift.py
 - `FORMAT_FAMILIES` dict maps family name → (extension set, availability flag)
 - `get_supported_extensions()` dynamically builds extension set based on available deps
 - `_open_image()` routes to correct decoder: rawpy for RAW, qoi for QOI, Pillow+plugins for everything else
-- `convert_file()` is thread-safe; atomic writes via temp file + `os.replace()` for in-place mode; post-save validation via `Image.verify()`; supports `in_place`, `skip_existing`, `resize_mode`/`resize_value`, `prefix`/`suffix`, `lossless_webp`, `progressive_jpeg`, `chroma_subsampling`, `convert_to_srgb`, `tiff_compression`, `png_compress_level`
+- `convert_file()` is thread-safe; atomic writes via temp file + `os.replace()` for in-place mode; post-save validation via `Image.verify()`; `ConvertResult.warnings` list for non-fatal issues; supports `in_place`, `skip_existing`, `resize_mode`/`resize_value`, `prefix`/`suffix`, `lossless_webp`, `progressive_jpeg`, `chroma_subsampling`, `convert_to_srgb`, `tiff_compression`, `png_compress_level`
 - `PRESETS` dict — built-in conversion presets (Web Optimized, Archive Quality, Mobile Friendly, Print/TIFF)
+- `SIZE_ESTIMATE_FACTORS` / `_estimate_output_size()` — per-format disk space estimation
+- `_build_parser()` — argparse CLI, `_run_cli()` — headless conversion with ThreadPoolExecutor
+- `_log_dep_versions_cli()` — prints dependency versions to stdout for CLI mode
+- `_update_title()` — dynamic window title with file count / conversion progress / done summary
 - `_apply_dark_titlebar()` — uses DwmSetWindowAttribute for native dark title bar on Windows
 - `_on_log_context_menu()` — right-click menu for log panel with copy and open file location
 - `ScanWorker(QThread)` scans in background, accepts filtered extension set
@@ -101,6 +122,7 @@ python heicshift.py
 - `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.5.0 — CLI mode (headless conversion), disk space pre-check, strip metadata option, auto-open output folder, file count in title bar, resize upscaling guard, better error logging (warnings), stats color reset, dependency version logging
 - v2.4.0 — Atomic writes for in-place mode, output file validation, dark title bar, conversion presets, smart format-dependent option visibility, log context menu, source/output overlap guard, elapsed time + speed stats
 - v2.3.0 — Memory safety (try/finally in convert_file), drag & drop hover visual, completion sound, JPEG chroma subsampling toggle, sRGB color space conversion, TIFF compression, PNG compression level, output format tooltips
 - v2.2.0 — Image resize, filename prefix/suffix, progressive JPEG, lossless WebP, recent directories dropdown, dark scrollbar theming

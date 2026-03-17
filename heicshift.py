@@ -1,14 +1,15 @@
 """
-HEICShift v2.4.0 - High-performance image batch converter
+HEICShift v2.5.0 - High-performance image batch converter
 Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, RAW,
 TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF.
 Auto-detects optimal format: PNG for images with transparency, JPEG for photos.
 Preserves EXIF metadata, ICC color profiles, and XMP data.
+Supports CLI mode for headless/scripted operation.
 """
 
-import sys, os, subprocess, importlib, platform, ctypes
+import sys, os, subprocess, importlib, platform, ctypes, argparse, shutil
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -63,6 +64,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from PIL import Image, ImageCms, ImageOps
+import pillow_heif
 from pillow_heif import register_heif_opener
 
 register_heif_opener()
@@ -449,6 +451,7 @@ class ConvertResult:
     size_after: int = 0
     elapsed: float = 0.0
     src_deleted: bool = False
+    warnings: list[str] = field(default_factory=list)
 
 @dataclass
 class ScanResult:
@@ -549,6 +552,10 @@ def convert_file(
     try:
         img, meta = _open_image(src)
 
+        # Warn when RAW files have no metadata to preserve
+        if src.suffix.lower() in RAW_EXTS and not meta:
+            result.warnings.append("RAW file: no EXIF/ICC metadata available after demosaic")
+
         # EXIF auto-rotate — apply orientation and strip the tag
         rotated = ImageOps.exif_transpose(img)
         if rotated is not None:
@@ -566,8 +573,8 @@ def convert_file(
                 # Update ICC profile in metadata to sRGB
                 srgb_profile = ImageCms.ImageCmsProfile(dst_profile)
                 meta["icc_profile"] = srgb_profile.tobytes()
-            except Exception:
-                pass  # If conversion fails, keep original colors
+            except Exception as e:
+                result.warnings.append(f"sRGB conversion failed: {e}")
 
         # Resize if requested
         if resize_mode == "max_dim" and resize_value > 0:
@@ -580,6 +587,8 @@ def convert_file(
                     new_h = resize_value
                     new_w = max(1, int(w * (resize_value / h)))
                 img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            else:
+                result.warnings.append(f"Already smaller than {resize_value}px ({w}x{h}), resize skipped")
         elif resize_mode == "scale" and resize_value != 100:
             w, h = img.size
             factor = resize_value / 100
@@ -815,6 +824,9 @@ class ConvertWorker(QThread):
                 else:
                     self.log.emit(f"[FAIL] {result.src.name}: {result.error}")
 
+                for warn in result.warnings:
+                    self.log.emit(f"[WARN] {result.src.name}: {warn}")
+
         self.finished_all.emit(results)
 
 
@@ -921,6 +933,17 @@ PRESETS = {
 }
 
 
+# ── Disk Space Estimation ─────────────────────────────────────────────────────
+
+SIZE_ESTIMATE_FACTORS = {"jpeg": 0.8, "auto": 0.8, "png": 1.2, "webp": 0.7, "tiff": 1.5}
+
+
+def _estimate_output_size(total_input_bytes: int, fmt: str) -> int:
+    """Estimate total output size based on format and input size."""
+    factor = SIZE_ESTIMATE_FACTORS.get(fmt, 1.0)
+    return int(total_input_bytes * factor)
+
+
 # ── Main Window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -950,8 +973,23 @@ class MainWindow(QMainWindow):
         self._log_startup()
 
     def _log_startup(self):
-        """Log supported formats and optional dep status on launch."""
+        """Log supported formats, dependency versions, and optional dep status on launch."""
         self._log(f"HEICShift v{APP_VERSION}")
+        # Core dependency versions
+        from PIL import __version__ as pil_ver
+        from PyQt6.QtCore import PYQT_VERSION_STR
+        heif_ver = getattr(pillow_heif, "__version__", "unknown")
+        self._log(f"Pillow {pil_ver}, pillow-heif {heif_ver}, PyQt6 {PYQT_VERSION_STR}")
+        # Optional dependency versions
+        opt_vers = []
+        if HAS_RAWPY:
+            opt_vers.append(f"rawpy {getattr(rawpy, '__version__', '?')}")
+        if HAS_JXL:
+            opt_vers.append(f"pillow-jxl {getattr(pillow_jxl, '__version__', '?')}")
+        if HAS_QOI:
+            opt_vers.append(f"qoi {getattr(qoi_lib, '__version__', '?')}")
+        if opt_vers:
+            self._log(f"Optional: {', '.join(opt_vers)}")
         self._log(f"Supported input formats: {get_format_support_summary()}")
         missing = []
         if not HAS_JXL:
@@ -965,6 +1003,23 @@ class MainWindow(QMainWindow):
         exts = sorted(get_supported_extensions())
         self._log(f"Scanning for: {' '.join(exts)}")
         self._log("")
+
+    def _update_title(self, state: str = "base", **kwargs):
+        """Update window title bar with contextual info."""
+        base = f"HEICShift v{APP_VERSION}"
+        if state == "scanned":
+            count = kwargs.get("count", 0)
+            self.setWindowTitle(f"{base} -- {count} files")
+        elif state == "converting":
+            current = kwargs.get("current", 0)
+            total = kwargs.get("total", 0)
+            self.setWindowTitle(f"{base} -- Converting {current}/{total}")
+        elif state == "done":
+            ok = kwargs.get("ok", 0)
+            fail = kwargs.get("fail", 0)
+            self.setWindowTitle(f"{base} -- Done ({ok} converted, {fail} failed)")
+        else:
+            self.setWindowTitle(base)
 
     def _apply_dark_titlebar(self):
         """Apply dark title bar on Windows 10 19041+ / Windows 11."""
@@ -1118,9 +1173,17 @@ class MainWindow(QMainWindow):
         self.workers_spin.setValue(min(cpu_count, 8))
         opt_grid.addWidget(self.workers_spin, 2, 1)
 
-        self.meta_chk = QCheckBox("Preserve EXIF / ICC / XMP metadata")
+        self.meta_chk = QCheckBox("Preserve metadata")
         self.meta_chk.setChecked(True)
-        opt_grid.addWidget(self.meta_chk, 2, 2, 1, 2)
+        self.meta_chk.setToolTip("Preserve EXIF, ICC color profiles, and XMP metadata")
+        self.meta_chk.toggled.connect(lambda checked: self.strip_meta_chk.setChecked(False) if checked else None)
+        opt_grid.addWidget(self.meta_chk, 2, 2)
+
+        self.strip_meta_chk = QCheckBox("Strip metadata")
+        self.strip_meta_chk.setChecked(False)
+        self.strip_meta_chk.setToolTip("Remove all EXIF, ICC, and XMP metadata from output files")
+        self.strip_meta_chk.toggled.connect(lambda checked: self.meta_chk.setChecked(False) if checked else None)
+        opt_grid.addWidget(self.strip_meta_chk, 2, 3)
 
         self.skip_existing_chk = QCheckBox("Skip files that already have output")
         self.skip_existing_chk.setChecked(False)
@@ -1223,6 +1286,11 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.stop_btn)
 
         actions.addStretch()
+
+        self.auto_open_chk = QCheckBox("Auto-open output folder")
+        self.auto_open_chk.setChecked(False)
+        self.auto_open_chk.setToolTip("Automatically open the output folder when conversion finishes")
+        actions.addWidget(self.auto_open_chk)
 
         self.open_output_btn = QPushButton("Open Output Folder")
         self.open_output_btn.setEnabled(False)
@@ -1535,6 +1603,7 @@ class MainWindow(QMainWindow):
 
     def _clear_log(self):
         self.log_view.clear()
+        self._update_title()
 
     # ── Scan ──
     def _scan(self):
@@ -1543,6 +1612,7 @@ class MainWindow(QMainWindow):
             self._log("[ERROR] Please select a valid source directory.")
             return
 
+        self._update_title()
         self.scan_btn.setEnabled(False)
         self.convert_btn.setEnabled(False)
         self.status_bar.showMessage("Scanning...")
@@ -1568,6 +1638,7 @@ class MainWindow(QMainWindow):
 
         if result.files:
             self.convert_btn.setEnabled(True)
+            self._update_title("scanned", count=len(result.files))
             # Count by format family
             ext_counts: dict[str, int] = {}
             for f in result.files:
@@ -1635,6 +1706,26 @@ class MainWindow(QMainWindow):
         fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "tiff"}
         fmt = fmt_map.get(self.fmt_combo.currentIndex(), "auto")
 
+        # Disk space pre-check
+        try:
+            estimated = _estimate_output_size(self._scan_result.total_size, fmt)
+            disk = shutil.disk_usage(dst)
+            if estimated > disk.free:
+                self._log(
+                    f"[ERROR] Not enough disk space. Estimated output: {_fmt_size(estimated)}, "
+                    f"available: {_fmt_size(disk.free)}"
+                )
+                self.scan_btn.setEnabled(True)
+                self.convert_btn.setEnabled(True)
+                return
+            if estimated > disk.free * 0.8:
+                self._log(
+                    f"[WARN] Estimated output ({_fmt_size(estimated)}) exceeds 80% of "
+                    f"available disk space ({_fmt_size(disk.free)})"
+                )
+        except (OSError, ValueError):
+            pass  # Network drives or unmounted paths may not support disk_usage
+
         resize_mode = "none"
         if self.resize_chk.isChecked():
             resize_mode = "max_dim" if self.resize_combo.currentIndex() == 0 else "scale"
@@ -1647,6 +1738,12 @@ class MainWindow(QMainWindow):
         self.stat_skipped._val.setText("0")
         self.stat_failed._val.setText("0")
         self.stat_saved._val.setText("0 B")
+        # Reset stat colors to default green for new batch
+        default_stat_style = f"color: {CAT['green']}; font-size: 22px; font-weight: 700;"
+        self.stat_done._val.setStyleSheet(default_stat_style)
+        self.stat_skipped._val.setStyleSheet(default_stat_style)
+        self.stat_failed._val.setStyleSheet(default_stat_style)
+        self.stat_saved._val.setStyleSheet(default_stat_style)
 
         self.scan_btn.setEnabled(False)
         self.convert_btn.setEnabled(False)
@@ -1662,7 +1759,7 @@ class MainWindow(QMainWindow):
             output_dir=Path(dst),
             fmt=fmt,
             quality=self.quality_slider.value(),
-            preserve_meta=self.meta_chk.isChecked(),
+            preserve_meta=self.meta_chk.isChecked() and not self.strip_meta_chk.isChecked(),
             preserve_structure=self.structure_chk.isChecked(),
             base_dir=Path(self.src_edit.text().strip()),
             workers=self.workers_spin.value(),
@@ -1688,6 +1785,7 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, current, total):
         self.progress_bar.setValue(current)
+        self._update_title("converting", current=current, total=total)
         elapsed = time.perf_counter() - self._convert_start_time
         if current > 0 and elapsed > 0 and current < total:
             speed = current / elapsed
@@ -1783,7 +1881,10 @@ class MainWindow(QMainWindow):
             )
             QTimer.singleShot(6000, self._tray.hide)
 
+        self._update_title("done", ok=ok, fail=fail)
         self._play_completion_sound()
+        if self.auto_open_chk.isChecked():
+            self._open_output()
         self._save_state()
 
     def _stop(self):
@@ -1823,6 +1924,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("convert_to_srgb", self.srgb_chk.isChecked())
         self.settings.setValue("tiff_compression", self.tiff_comp_combo.currentIndex())
         self.settings.setValue("png_compress_level", self.png_level_spin.value())
+        self.settings.setValue("strip_metadata", self.strip_meta_chk.isChecked())
+        self.settings.setValue("auto_open_output", self.auto_open_chk.isChecked())
         self.settings.setValue("geometry", self.saveGeometry())
         # Format filter states
         filter_state = {name: chk.isChecked() for name, chk in self._format_filters.items()}
@@ -1879,6 +1982,10 @@ class MainWindow(QMainWindow):
             self.tiff_comp_combo.setCurrentIndex(int(v))
         if (v := self.settings.value("png_compress_level")) is not None:
             self.png_level_spin.setValue(int(v))
+        if (v := self.settings.value("strip_metadata")) is not None:
+            self.strip_meta_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("auto_open_output")) is not None:
+            self.auto_open_chk.setChecked(v == "true" or v is True)
         if v := self.settings.value("geometry"):
             self.restoreGeometry(v)
         # Restore format filter states
@@ -1900,9 +2007,187 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+# ── CLI Mode ──────────────────────────────────────────────────────────────────
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build argument parser for CLI mode."""
+    p = argparse.ArgumentParser(
+        prog="heicshift",
+        description=f"HEICShift v{APP_VERSION} - High-performance image batch converter",
+    )
+    p.add_argument("--version", action="version", version=f"HEICShift v{APP_VERSION}")
+    p.add_argument("-i", "--input", type=str, help="Source directory to scan")
+    p.add_argument("-o", "--output", type=str, help="Output directory (default: <input>/converted)")
+    p.add_argument("-f", "--format", type=str, default="auto",
+                   choices=["auto", "jpeg", "png", "webp", "tiff"],
+                   help="Output format (default: auto)")
+    p.add_argument("-q", "--quality", type=int, default=92, help="JPEG/WebP quality 50-100 (default: 92)")
+    p.add_argument("-w", "--workers", type=int, default=min(os.cpu_count() or 4, 8),
+                   help="Parallel worker count (default: min(cpu_count, 8))")
+    p.add_argument("--in-place", action="store_true", help="Convert next to originals, delete source")
+    p.add_argument("--recursive", action="store_true", default=True, dest="recursive",
+                   help="Scan subdirectories (default)")
+    p.add_argument("--no-recursive", action="store_false", dest="recursive",
+                   help="Only scan top-level directory")
+    p.add_argument("--dry-run", action="store_true", help="List files that would be converted, then exit")
+    p.add_argument("--strip-metadata", action="store_true", help="Remove all metadata from output files")
+    p.add_argument("--resize", type=str, default=None, metavar="max_dim:VALUE",
+                   help="Resize by max dimension, e.g. max_dim:1920")
+    return p
+
+
+def _log_dep_versions_cli():
+    """Print dependency versions to stdout for CLI mode."""
+    from PIL import __version__ as pil_ver
+    heif_ver = getattr(pillow_heif, "__version__", "unknown")
+    print(f"Pillow {pil_ver}, pillow-heif {heif_ver}")
+    opt_vers = []
+    if HAS_RAWPY:
+        opt_vers.append(f"rawpy {getattr(rawpy, '__version__', '?')}")
+    if HAS_JXL:
+        opt_vers.append(f"pillow-jxl {getattr(pillow_jxl, '__version__', '?')}")
+    if HAS_QOI:
+        opt_vers.append(f"qoi {getattr(qoi_lib, '__version__', '?')}")
+    if opt_vers:
+        print(f"Optional: {', '.join(opt_vers)}")
+
+
+def _run_cli(args):
+    """Run headless CLI conversion."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    input_dir = Path(args.input).resolve()
+    if not input_dir.is_dir():
+        print(f"[ERROR] Not a directory: {input_dir}")
+        sys.exit(2)
+
+    if args.in_place:
+        output_dir = input_dir
+    elif args.output:
+        output_dir = Path(args.output).resolve()
+    else:
+        output_dir = input_dir / "converted"
+
+    print(f"HEICShift v{APP_VERSION} (CLI mode)")
+    _log_dep_versions_cli()
+    print(f"Input:  {input_dir}")
+    print(f"Output: {output_dir}")
+    print(f"Format: {args.format}  Quality: {args.quality}  Workers: {args.workers}")
+
+    # Parse resize
+    resize_mode = "none"
+    resize_value = 1920
+    if args.resize:
+        try:
+            parts = args.resize.split(":")
+            if len(parts) == 2 and parts[0] == "max_dim":
+                resize_mode = "max_dim"
+                resize_value = int(parts[1])
+            else:
+                print(f"[ERROR] Invalid resize format: {args.resize} (use max_dim:VALUE)")
+                sys.exit(2)
+        except ValueError:
+            print(f"[ERROR] Invalid resize value: {args.resize}")
+            sys.exit(2)
+
+    # Scan
+    print(f"\nScanning{'  recursively' if args.recursive else ''}...")
+    scan = scan_directory(input_dir, args.recursive)
+    print(f"Found {len(scan.files)} files ({_fmt_size(scan.total_size)}) in {scan.elapsed:.2f}s")
+
+    if not scan.files:
+        print("No supported files found.")
+        sys.exit(0)
+
+    # Dry run — list and exit
+    if args.dry_run:
+        print(f"\n[DRY RUN] Would convert {len(scan.files)} files:")
+        for f in sorted(scan.files):
+            print(f"  {f}")
+        sys.exit(0)
+
+    # Disk space check
+    if not args.in_place:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        estimated = _estimate_output_size(scan.total_size, args.format)
+        disk = shutil.disk_usage(str(output_dir))
+        if estimated > disk.free:
+            print(
+                f"[ERROR] Not enough disk space. Estimated output: {_fmt_size(estimated)}, "
+                f"available: {_fmt_size(disk.free)}"
+            )
+            sys.exit(2)
+        if estimated > disk.free * 0.8:
+            print(
+                f"[WARN] Estimated output ({_fmt_size(estimated)}) exceeds 80% of "
+                f"available disk space ({_fmt_size(disk.free)})"
+            )
+    except (OSError, ValueError):
+        pass
+
+    # Convert
+    preserve_meta = not args.strip_metadata
+    ok_count = 0
+    fail_count = 0
+    skip_count = 0
+    total = len(scan.files)
+
+    print(f"\nConverting {total} files with {args.workers} workers...\n")
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {}
+        for f in scan.files:
+            fut = pool.submit(
+                convert_file, f, output_dir, args.format, args.quality,
+                preserve_meta, False, input_dir, args.in_place, False,
+                resize_mode, resize_value, "", "", False, False, False, False,
+                "none", 6,
+            )
+            futures[fut] = f
+
+        for fut in as_completed(futures):
+            result = fut.result()
+            if result.skipped:
+                skip_count += 1
+                print(f"[SKIP] {result.src.name}")
+            elif result.success:
+                ok_count += 1
+                saved = result.size_before - result.size_after
+                pct = (saved / result.size_before * 100) if result.size_before else 0
+                deleted_tag = "  [source deleted]" if result.src_deleted else ""
+                print(
+                    f"[OK] {result.src.name} -> {result.dst.name}  "
+                    f"({_fmt_size(result.size_before)} -> {_fmt_size(result.size_after)}, "
+                    f"{pct:+.1f}%)  [{result.elapsed:.2f}s]{deleted_tag}"
+                )
+            else:
+                fail_count += 1
+                print(f"[FAIL] {result.src.name}: {result.error}")
+
+            for warn in result.warnings:
+                print(f"[WARN] {result.src.name}: {warn}")
+
+    print(f"\nDone: {ok_count} converted, {fail_count} failed, {skip_count} skipped")
+
+    if fail_count == total:
+        sys.exit(2)
+    elif fail_count > 0:
+        sys.exit(1)
+    sys.exit(0)
+
+
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 def main():
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    # CLI mode if --input is provided
+    if args.input:
+        _run_cli(args)
+        return
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLESHEET)
