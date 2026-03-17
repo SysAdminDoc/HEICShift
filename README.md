@@ -43,6 +43,14 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Auto format detection** — JPEG for photos, PNG when alpha channel is present
 - **10+ input formats** — HEIC, AVIF, WebP, JXL, RAW, TIFF, BMP, JP2, QOI, ICO
 - **In-place conversion** — convert next to the original and delete the source file
+- **Atomic writes** — in-place mode uses temp file + atomic rename for crash-safe conversion
+- **Output validation** — verifies file exists, size > 0, and passes integrity check before accepting
+- **Conversion presets** — Web Optimized, Archive Quality, Mobile Friendly, Print/TIFF one-click presets
+- **Smart option visibility** — format-specific controls auto-show/hide based on output format
+- **Dark title bar** — native dark title bar on Windows 10/11 matching Catppuccin theme
+- **Conversion speed stats** — elapsed time + files/sec displayed in status bar during conversion
+- **Log context menu** — right-click for Copy Selection, Copy All, Open File Location
+- **Source/output overlap guard** — prevents output directory from overwriting source files
 - **Drag & drop** — drop a folder onto the window to set the source directory
 - **Format filter** — per-family checkboxes to include or exclude input formats from scanning
 - **Skip existing** — resume interrupted batches by skipping files where output already exists
@@ -51,6 +59,10 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Filename prefix/suffix** — prepend or append text to output filenames
 - **Progressive JPEG** — optional progressive encoding for web-optimized output
 - **Lossless WebP** — optional lossless mode when WebP is selected as output
+- **JPEG chroma subsampling** — toggle between 4:4:4 (default, max fidelity) and 4:2:0 (smaller files)
+- **sRGB color conversion** — convert embedded ICC profiles (Display P3, Adobe RGB, etc.) to sRGB
+- **TIFF compression** — None, LZW, or Deflate when TIFF output is selected
+- **PNG compression level** — adjustable 1–9 for PNG output (default 6)
 - **Recent directories** — dropdown of last 10 source directories for quick re-access
 - **Metadata preservation** — EXIF, ICC color profiles, XMP
 - **Parallel conversion** — 1–32 workers via ThreadPoolExecutor
@@ -60,11 +72,11 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Scan breakdown** — shows count per format family after scanning
 - **Live stats** — files found, total size, converted, skipped, failed, space saved
 - **Progress ETA** — shows current filename and estimated time remaining
-- **Completion notification** — system tray balloon when batch finishes
+- **Completion notification** — system tray balloon + notification sound when batch finishes
 - **Embedded log** — per-file results with timing and size delta, export to file or clear
 - **Cancel support** — stop mid-conversion without corrupting output
 - **Settings persistence** — remembers all settings including format filter state across sessions
-- **Catppuccin Mocha dark theme** — including dark scrollbars
+- **Catppuccin Mocha dark theme** — including dark scrollbars and dark title bar
 - **Cross-platform** — native file manager integration on Windows, macOS, and Linux
 
 ## Installation

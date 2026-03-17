@@ -1,14 +1,14 @@
 """
-HEICShift v2.2.0 - High-performance image batch converter
+HEICShift v2.4.0 - High-performance image batch converter
 Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, RAW,
 TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF.
 Auto-detects optimal format: PNG for images with transparency, JPEG for photos.
 Preserves EXIF metadata, ICC color profiles, and XMP data.
 """
 
-import sys, os, subprocess, importlib, platform
+import sys, os, subprocess, importlib, platform, ctypes
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.4.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -53,6 +53,7 @@ def _bootstrap():
 
 _bootstrap()
 
+import io
 import time
 import json
 import traceback
@@ -533,10 +534,17 @@ def convert_file(
     suffix: str = "",
     lossless_webp: bool = False,
     progressive_jpeg: bool = False,
+    chroma_subsampling: bool = False,
+    convert_to_srgb: bool = False,
+    tiff_compression: str = "none",
+    png_compress_level: int = 6,
 ) -> ConvertResult:
     """Convert a single image file. Thread-safe."""
     t0 = time.perf_counter()
     result = ConvertResult(src=src, size_before=src.stat().st_size)
+    img = None
+    out_path = None
+    temp_path = None
 
     try:
         img, meta = _open_image(src)
@@ -548,6 +556,18 @@ def convert_file(
             # Refresh EXIF from the transposed image (orientation tag removed)
             if "exif" in img.info:
                 meta["exif"] = img.info["exif"]
+
+        # sRGB color space conversion
+        if convert_to_srgb and "icc_profile" in meta:
+            try:
+                src_profile = ImageCms.ImageCmsProfile(io.BytesIO(meta["icc_profile"]))
+                dst_profile = ImageCms.createProfile("sRGB")
+                img = ImageCms.profileToProfile(img, src_profile, dst_profile, outputMode="RGB")
+                # Update ICC profile in metadata to sRGB
+                srgb_profile = ImageCms.ImageCmsProfile(dst_profile)
+                meta["icc_profile"] = srgb_profile.tobytes()
+            except Exception:
+                pass  # If conversion fails, keep original colors
 
         # Resize if requested
         if resize_mode == "max_dim" and resize_value > 0:
@@ -603,7 +623,6 @@ def convert_file(
             result.dst = out_path
             result.size_after = out_path.stat().st_size
             result.elapsed = time.perf_counter() - t0
-            img.close()
             return result
 
         # Handle name collisions
@@ -627,21 +646,46 @@ def convert_file(
             if img.mode in ("RGBA", "LA", "PA", "P"):
                 img = img.convert("RGB")
             save_kwargs["quality"] = jpeg_quality
-            save_kwargs["subsampling"] = 0  # 4:4:4 chroma
+            save_kwargs["subsampling"] = 2 if chroma_subsampling else 0
             save_kwargs["optimize"] = True
             if progressive_jpeg:
                 save_kwargs["progressive"] = True
         elif out_fmt == "PNG":
             save_kwargs["optimize"] = True
+            save_kwargs["compress_level"] = png_compress_level
         elif out_fmt == "WEBP":
             if lossless_webp:
                 save_kwargs["lossless"] = True
             else:
                 save_kwargs["quality"] = jpeg_quality
             save_kwargs["method"] = 4
+        elif out_fmt == "TIFF":
+            if tiff_compression == "lzw":
+                save_kwargs["compression"] = "tiff_lzw"
+            elif tiff_compression == "deflate":
+                save_kwargs["compression"] = "tiff_deflate"
 
-        img.save(str(out_path), out_fmt, **save_kwargs)
-        img.close()
+        # Atomic write: use temp file for in-place mode
+        if in_place:
+            temp_path = out_path.parent / (out_path.name + ".heicshift.tmp")
+            img.save(str(temp_path), out_fmt, **save_kwargs)
+        else:
+            img.save(str(out_path), out_fmt, **save_kwargs)
+
+        # Validate output file integrity
+        check_path = temp_path if in_place else out_path
+        if not check_path.exists() or check_path.stat().st_size == 0:
+            raise RuntimeError(f"Output file missing or empty: {check_path.name}")
+        try:
+            with Image.open(str(check_path)) as verify_img:
+                verify_img.verify()
+        except Exception as ve:
+            raise RuntimeError(f"Output validation failed: {ve}")
+
+        # Atomic rename for in-place mode
+        if in_place:
+            os.replace(str(temp_path), str(out_path))
+            temp_path = None  # Rename succeeded, no temp to clean
 
         result.dst = out_path
         result.size_after = out_path.stat().st_size
@@ -654,6 +698,24 @@ def convert_file(
 
     except Exception as e:
         result.error = str(e)
+        # Clean up temp file on failure
+        if temp_path and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        # Clean up partial output on failure
+        if out_path and out_path.exists() and not result.success:
+            try:
+                out_path.unlink()
+            except OSError:
+                pass
+    finally:
+        if img is not None:
+            try:
+                img.close()
+            except Exception:
+                pass
 
     result.elapsed = time.perf_counter() - t0
     return result
@@ -672,7 +734,9 @@ class ConvertWorker(QThread):
                  preserve_structure, base_dir, workers, in_place=False,
                  skip_existing=False, resize_mode="none", resize_value=1920,
                  prefix="", suffix="", lossless_webp=False,
-                 progressive_jpeg=False):
+                 progressive_jpeg=False, chroma_subsampling=False,
+                 convert_to_srgb=False, tiff_compression="none",
+                 png_compress_level=6):
         super().__init__()
         self.files = files
         self.output_dir = Path(output_dir)
@@ -690,6 +754,10 @@ class ConvertWorker(QThread):
         self.suffix = suffix
         self.lossless_webp = lossless_webp
         self.progressive_jpeg = progressive_jpeg
+        self.chroma_subsampling = chroma_subsampling
+        self.convert_to_srgb = convert_to_srgb
+        self.tiff_compression = tiff_compression
+        self.png_compress_level = png_compress_level
         self._stop = False
 
     def stop(self):
@@ -715,6 +783,8 @@ class ConvertWorker(QThread):
                     self.resize_mode, self.resize_value,
                     self.prefix, self.suffix,
                     self.lossless_webp, self.progressive_jpeg,
+                    self.chroma_subsampling, self.convert_to_srgb,
+                    self.tiff_compression, self.png_compress_level,
                 )
                 futures[fut] = f
 
@@ -816,6 +886,41 @@ def _create_app_icon() -> QIcon:
     return QIcon(pm)
 
 
+# ── Conversion Presets ────────────────────────────────────────────────────────
+
+PRESETS = {
+    "Web Optimized": {
+        "fmt": 1,              # JPEG
+        "quality": 80,
+        "progressive_jpeg": True,
+        "chroma_subsampling": True,
+        "convert_to_srgb": True,
+        "resize_enabled": True,
+        "resize_mode": 0,      # Max Dimension
+        "resize_value": 1920,
+    },
+    "Archive Quality": {
+        "fmt": 2,              # PNG
+        "quality": 92,
+        "png_compress_level": 6,
+        "resize_enabled": False,
+    },
+    "Mobile Friendly": {
+        "fmt": 3,              # WebP
+        "quality": 75,
+        "convert_to_srgb": True,
+        "resize_enabled": True,
+        "resize_mode": 0,      # Max Dimension
+        "resize_value": 1080,
+    },
+    "Print / TIFF": {
+        "fmt": 4,              # TIFF
+        "tiff_compression": 1, # LZW
+        "resize_enabled": False,
+    },
+}
+
+
 # ── Main Window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -834,11 +939,13 @@ class MainWindow(QMainWindow):
         self._worker: ConvertWorker | None = None
         self._results: list[ConvertResult] = []
         self._convert_start_time: float = 0.0
+        self._last_ok_dst: Path | None = None
 
         # System tray for completion notifications
         self._tray = QSystemTrayIcon(self._icon, self)
 
         self._build_ui()
+        self._apply_dark_titlebar()
         self._restore_state()
         self._log_startup()
 
@@ -858,6 +965,19 @@ class MainWindow(QMainWindow):
         exts = sorted(get_supported_extensions())
         self._log(f"Scanning for: {' '.join(exts)}")
         self._log("")
+
+    def _apply_dark_titlebar(self):
+        """Apply dark title bar on Windows 10 19041+ / Windows 11."""
+        if platform.system() != "Windows":
+            return
+        try:
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)
+            )
+        except Exception:
+            pass
 
     def _build_ui(self):
         central = QWidget()
@@ -961,9 +1081,25 @@ class MainWindow(QMainWindow):
             "Auto (JPEG for photos, PNG for transparency)",
             "JPEG", "PNG", "WebP", "TIFF"
         ])
-        opt_grid.addWidget(self.fmt_combo, 0, 1, 1, 3)
+        self.fmt_combo.setItemData(0, "JPEG for photos, PNG when transparency exists", Qt.ItemDataRole.ToolTipRole)
+        self.fmt_combo.setItemData(1, "Best for photographs, lossy compression", Qt.ItemDataRole.ToolTipRole)
+        self.fmt_combo.setItemData(2, "Lossless, supports transparency", Qt.ItemDataRole.ToolTipRole)
+        self.fmt_combo.setItemData(3, "Modern format, smaller files", Qt.ItemDataRole.ToolTipRole)
+        self.fmt_combo.setItemData(4, "Lossless, professional workflows", Qt.ItemDataRole.ToolTipRole)
+        opt_grid.addWidget(self.fmt_combo, 0, 1, 1, 2)
 
-        opt_grid.addWidget(QLabel("JPEG/WebP Quality:"), 1, 0)
+        self._preset_btn = QToolButton()
+        self._preset_btn.setText("Presets")
+        self._preset_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._preset_btn.setToolTip("Apply a conversion preset")
+        preset_menu = QMenu(self)
+        for name in PRESETS:
+            preset_menu.addAction(name, lambda n=name: self._apply_preset(n))
+        self._preset_btn.setMenu(preset_menu)
+        opt_grid.addWidget(self._preset_btn, 0, 3)
+
+        self.quality_desc_label = QLabel("JPEG/WebP Quality:")
+        opt_grid.addWidget(self.quality_desc_label, 1, 0)
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setRange(50, 100)
         self.quality_slider.setValue(92)
@@ -1032,6 +1168,38 @@ class MainWindow(QMainWindow):
         self.suffix_edit.setPlaceholderText("e.g. _web")
         self.suffix_edit.setMaximumWidth(180)
         opt_grid.addWidget(self.suffix_edit, 5, 3)
+
+        # ── Chroma Subsampling + sRGB ──
+        self.chroma_chk = QCheckBox("4:2:0 chroma (smaller JPEG files)")
+        self.chroma_chk.setChecked(False)
+        self.chroma_chk.setToolTip("Use 4:2:0 chroma subsampling instead of 4:4:4 for smaller JPEGs (slight color detail loss)")
+        opt_grid.addWidget(self.chroma_chk, 6, 0, 1, 2)
+
+        self.srgb_chk = QCheckBox("Convert colors to sRGB")
+        self.srgb_chk.setChecked(False)
+        self.srgb_chk.setToolTip("Convert embedded ICC profiles (e.g. Display P3) to sRGB for maximum compatibility")
+        opt_grid.addWidget(self.srgb_chk, 6, 2, 1, 2)
+
+        # ── TIFF Compression + PNG Compression Level ──
+        self.tiff_comp_label = QLabel("TIFF Compression:")
+        opt_grid.addWidget(self.tiff_comp_label, 7, 0)
+        self.tiff_comp_combo = QComboBox()
+        self.tiff_comp_combo.addItems(["None", "LZW", "Deflate"])
+        self.tiff_comp_combo.setMaximumWidth(180)
+        opt_grid.addWidget(self.tiff_comp_combo, 7, 1)
+
+        self.png_level_label = QLabel("PNG Compression:")
+        opt_grid.addWidget(self.png_level_label, 7, 2)
+        self.png_level_spin = QSpinBox()
+        self.png_level_spin.setRange(1, 9)
+        self.png_level_spin.setValue(6)
+        self.png_level_spin.setToolTip("PNG compression level (1=fastest, 9=smallest)")
+        self.png_level_spin.setMaximumWidth(180)
+        opt_grid.addWidget(self.png_level_spin, 7, 3)
+
+        # Show/hide TIFF and PNG controls based on format selection
+        self.fmt_combo.currentIndexChanged.connect(self._on_format_changed)
+        self._on_format_changed(self.fmt_combo.currentIndex())
 
         root.addWidget(opt_group)
 
@@ -1114,6 +1282,8 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
+        self.log_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.log_view.customContextMenuRequested.connect(self._on_log_context_menu)
         root.addWidget(self.log_view, 1)
 
         # ── Status bar ──
@@ -1147,9 +1317,18 @@ class MainWindow(QMainWindow):
             for url in event.mimeData().urls():
                 if url.isLocalFile() and Path(url.toLocalFile()).is_dir():
                     event.acceptProposedAction()
+                    self.src_edit.setStyleSheet(f"border: 2px solid {CAT['lavender']};")
                     return
 
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self.src_edit.setStyleSheet("")
+
     def dropEvent(self, event: QDropEvent):
+        self.src_edit.setStyleSheet("")
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if Path(path).is_dir():
@@ -1160,6 +1339,64 @@ class MainWindow(QMainWindow):
                 self._log(f"Source set via drag & drop: {path}")
                 event.acceptProposedAction()
                 return
+
+    # ── Log context menu ──
+    def _on_log_context_menu(self, pos):
+        menu = QMenu(self)
+        copy_sel = menu.addAction("Copy Selection")
+        copy_sel.setEnabled(self.log_view.textCursor().hasSelection())
+        copy_sel.triggered.connect(self.log_view.copy)
+
+        copy_all = menu.addAction("Copy All")
+        copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.log_view.toPlainText()))
+
+        menu.addSeparator()
+
+        open_loc = menu.addAction("Open File Location")
+        open_loc.setEnabled(self._last_ok_dst is not None)
+        open_loc.triggered.connect(
+            lambda: _open_path(str(self._last_ok_dst.parent)) if self._last_ok_dst else None
+        )
+
+        menu.exec(self.log_view.mapToGlobal(pos))
+
+    # ── Presets ──
+    def _apply_preset(self, name: str):
+        preset = PRESETS.get(name)
+        if not preset:
+            return
+        if "fmt" in preset:
+            self.fmt_combo.setCurrentIndex(preset["fmt"])
+        if "quality" in preset:
+            self.quality_slider.setValue(preset["quality"])
+        if "progressive_jpeg" in preset:
+            self.progressive_jpeg_chk.setChecked(preset["progressive_jpeg"])
+        else:
+            self.progressive_jpeg_chk.setChecked(False)
+        if "lossless_webp" in preset:
+            self.lossless_webp_chk.setChecked(preset["lossless_webp"])
+        else:
+            self.lossless_webp_chk.setChecked(False)
+        if "chroma_subsampling" in preset:
+            self.chroma_chk.setChecked(preset["chroma_subsampling"])
+        else:
+            self.chroma_chk.setChecked(False)
+        if "convert_to_srgb" in preset:
+            self.srgb_chk.setChecked(preset["convert_to_srgb"])
+        else:
+            self.srgb_chk.setChecked(False)
+        if "resize_enabled" in preset:
+            self.resize_chk.setChecked(preset["resize_enabled"])
+            if preset["resize_enabled"]:
+                if "resize_mode" in preset:
+                    self.resize_combo.setCurrentIndex(preset["resize_mode"])
+                if "resize_value" in preset:
+                    self.resize_spin.setValue(preset["resize_value"])
+        if "tiff_compression" in preset:
+            self.tiff_comp_combo.setCurrentIndex(preset["tiff_compression"])
+        if "png_compress_level" in preset:
+            self.png_level_spin.setValue(preset["png_compress_level"])
+        self._log(f"Preset applied: {name}")
 
     # ── In-place toggle ──
     def _on_inplace_toggled(self, checked: bool):
@@ -1229,6 +1466,47 @@ class MainWindow(QMainWindow):
         if not self.dst_edit.text() and not self.inplace_chk.isChecked():
             self.dst_edit.setText(str(Path(path) / "converted"))
         self._log(f"Source set from recent: {path}")
+
+    # ── Format-dependent controls ──
+    def _on_format_changed(self, idx: int):
+        """Show/hide format-specific controls based on selected output format."""
+        # idx: 0=Auto, 1=JPEG, 2=PNG, 3=WebP, 4=TIFF
+        is_auto = idx == 0
+        is_jpeg = idx == 1
+        is_png = idx == 2
+        is_webp = idx == 3
+        is_tiff = idx == 4
+
+        # Quality slider: JPEG, WebP, Auto
+        show_quality = is_auto or is_jpeg or is_webp
+        self.quality_desc_label.setVisible(show_quality)
+        self.quality_slider.setVisible(show_quality)
+        self.quality_label.setVisible(show_quality)
+
+        # Quality label text
+        if is_jpeg:
+            self.quality_desc_label.setText("JPEG Quality:")
+        elif is_webp:
+            self.quality_desc_label.setText("WebP Quality:")
+        else:
+            self.quality_desc_label.setText("JPEG/WebP Quality:")
+
+        # Chroma subsampling: JPEG, Auto
+        self.chroma_chk.setVisible(is_auto or is_jpeg)
+
+        # Progressive JPEG: JPEG, Auto
+        self.progressive_jpeg_chk.setVisible(is_auto or is_jpeg)
+
+        # Lossless WebP: WebP, Auto
+        self.lossless_webp_chk.setVisible(is_auto or is_webp)
+
+        # TIFF compression: TIFF only
+        self.tiff_comp_label.setVisible(is_tiff)
+        self.tiff_comp_combo.setVisible(is_tiff)
+
+        # PNG compression: PNG only
+        self.png_level_label.setVisible(is_png)
+        self.png_level_spin.setVisible(is_png)
 
     # ── Resize controls ──
     def _on_resize_toggled(self, checked: bool):
@@ -1339,6 +1617,21 @@ class MainWindow(QMainWindow):
                 self.dst_edit.setText(dst)
             Path(dst).mkdir(parents=True, exist_ok=True)
 
+        # Source/output overlap guard
+        src_resolved = Path(self.src_edit.text().strip()).resolve()
+        dst_resolved = Path(dst).resolve()
+        if not in_place and dst_resolved == src_resolved:
+            self._log("[ERROR] Output directory is the same as source directory. Use a subfolder or enable in-place mode.")
+            self.scan_btn.setEnabled(True)
+            self.convert_btn.setEnabled(True)
+            return
+        if not in_place and dst_resolved != src_resolved:
+            try:
+                if dst_resolved.is_relative_to(src_resolved):
+                    self._log("[WARN] Output directory is inside the source directory. This is fine for most workflows.")
+            except (ValueError, TypeError):
+                pass
+
         fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "tiff"}
         fmt = fmt_map.get(self.fmt_combo.currentIndex(), "auto")
 
@@ -1381,6 +1674,10 @@ class MainWindow(QMainWindow):
             suffix=self.suffix_edit.text(),
             lossless_webp=self.lossless_webp_chk.isChecked(),
             progressive_jpeg=self.progressive_jpeg_chk.isChecked(),
+            chroma_subsampling=self.chroma_chk.isChecked(),
+            convert_to_srgb=self.srgb_chk.isChecked(),
+            tiff_compression=["none", "lzw", "deflate"][self.tiff_comp_combo.currentIndex()],
+            png_compress_level=self.png_level_spin.value(),
         )
         self._worker.log.connect(self._log)
         self._worker.progress.connect(self._on_progress)
@@ -1392,11 +1689,16 @@ class MainWindow(QMainWindow):
     def _on_progress(self, current, total):
         self.progress_bar.setValue(current)
         elapsed = time.perf_counter() - self._convert_start_time
-        if current > 0 and current < total:
+        if current > 0 and elapsed > 0 and current < total:
+            speed = current / elapsed
             rate = elapsed / current
             remaining = (total - current) * rate
-            eta = _fmt_eta(remaining)
-            self.status_bar.showMessage(f"Converting... {current}/{total} — ETA: {eta}")
+            self.status_bar.showMessage(
+                f"Converting... {current}/{total} -- "
+                f"{speed:.1f} files/sec -- "
+                f"Elapsed: {_fmt_eta(elapsed)} -- "
+                f"ETA: {_fmt_eta(remaining)}"
+            )
         else:
             self.status_bar.showMessage(f"Converting... {current}/{total}")
 
@@ -1405,6 +1707,8 @@ class MainWindow(QMainWindow):
 
     def _on_file_done(self, result: ConvertResult):
         self._results.append(result)
+        if result.success and result.dst:
+            self._last_ok_dst = result.dst
         ok = sum(1 for r in self._results if r.success)
         skipped = sum(1 for r in self._results if r.skipped)
         fail = sum(1 for r in self._results if not r.success and not r.skipped)
@@ -1422,6 +1726,20 @@ class MainWindow(QMainWindow):
             self.stat_saved._val.setStyleSheet(f"color: {CAT['green']}; font-size: 22px; font-weight: 700;")
         else:
             self.stat_saved._val.setStyleSheet(f"color: {CAT['peach']}; font-size: 22px; font-weight: 700;")
+
+    def _play_completion_sound(self):
+        """Play a platform-specific notification sound."""
+        try:
+            system = platform.system()
+            if system == "Windows":
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            elif system == "Darwin":
+                subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
+            else:
+                subprocess.Popen(["paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"])
+        except Exception:
+            pass
 
     def _on_convert_done(self, results):
         self.scan_btn.setEnabled(True)
@@ -1465,6 +1783,7 @@ class MainWindow(QMainWindow):
             )
             QTimer.singleShot(6000, self._tray.hide)
 
+        self._play_completion_sound()
         self._save_state()
 
     def _stop(self):
@@ -1500,6 +1819,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("resize_value", self.resize_spin.value())
         self.settings.setValue("prefix", self.prefix_edit.text())
         self.settings.setValue("suffix", self.suffix_edit.text())
+        self.settings.setValue("chroma_subsampling", self.chroma_chk.isChecked())
+        self.settings.setValue("convert_to_srgb", self.srgb_chk.isChecked())
+        self.settings.setValue("tiff_compression", self.tiff_comp_combo.currentIndex())
+        self.settings.setValue("png_compress_level", self.png_level_spin.value())
         self.settings.setValue("geometry", self.saveGeometry())
         # Format filter states
         filter_state = {name: chk.isChecked() for name, chk in self._format_filters.items()}
@@ -1548,6 +1871,14 @@ class MainWindow(QMainWindow):
             self.prefix_edit.setText(v)
         if (v := self.settings.value("suffix")) is not None:
             self.suffix_edit.setText(v)
+        if (v := self.settings.value("chroma_subsampling")) is not None:
+            self.chroma_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("convert_to_srgb")) is not None:
+            self.srgb_chk.setChecked(v == "true" or v is True)
+        if (v := self.settings.value("tiff_compression")) is not None:
+            self.tiff_comp_combo.setCurrentIndex(int(v))
+        if (v := self.settings.value("png_compress_level")) is not None:
+            self.png_level_spin.setValue(int(v))
         if v := self.settings.value("geometry"):
             self.restoreGeometry(v)
         # Restore format filter states

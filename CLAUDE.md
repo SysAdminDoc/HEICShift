@@ -44,6 +44,8 @@ python heicshift.py
 ## Features
 - Auto-detect format: JPEG for photos, PNG for transparent images
 - **In-place mode**: converts next to the original file and deletes source on success
+- **Atomic writes**: in-place mode uses temp file + `os.replace()` for crash-safe conversion
+- **Output validation**: verifies output exists, has size > 0, passes `Image.verify()` before accepting
 - **Drag & drop**: drop a folder onto the window to set source directory
 - **Format filter**: per-family checkboxes to include/exclude input formats from scanning
 - **Skip existing**: resume interrupted batches by skipping files with existing output
@@ -53,6 +55,19 @@ python heicshift.py
 - **Progressive JPEG**: optional progressive encoding for web-optimized JPEGs
 - **Lossless WebP**: optional lossless mode for WebP output
 - **Recent directories**: dropdown of last 10 source directories for quick access
+- **JPEG chroma subsampling toggle**: switch between 4:4:4 (default) and 4:2:0 for smaller files
+- **sRGB color space conversion**: convert embedded ICC profiles (e.g. Display P3) to sRGB
+- **TIFF compression**: None / LZW / Deflate for TIFF output
+- **PNG compression level**: adjustable 1–9 (default 6)
+- **Conversion presets**: Web Optimized, Archive Quality, Mobile Friendly, Print/TIFF one-click presets
+- **Smart option visibility**: format-specific controls auto-show/hide based on output format selection
+- **Dark title bar**: native dark title bar on Windows 10/11
+- **Conversion speed stats**: elapsed time + files/sec in status bar during conversion
+- **Log context menu**: right-click log for Copy Selection, Copy All, Open File Location
+- **Source/output overlap guard**: blocks conversion when output dir equals source dir
+- **Completion sound**: platform-specific notification sound on batch finish
+- **Drag & drop hover visual**: lavender border highlight on source input during drag hover
+- **Output format tooltips**: descriptive tooltips on each output format option
 - EXIF, ICC color profile, and XMP metadata preservation
 - Parallel conversion with configurable worker count
 - Preserves folder structure in output (optional)
@@ -75,7 +90,10 @@ python heicshift.py
 - `FORMAT_FAMILIES` dict maps family name → (extension set, availability flag)
 - `get_supported_extensions()` dynamically builds extension set based on available deps
 - `_open_image()` routes to correct decoder: rawpy for RAW, qoi for QOI, Pillow+plugins for everything else
-- `convert_file()` is thread-safe; supports `in_place`, `skip_existing`, `resize_mode`/`resize_value`, `prefix`/`suffix`, `lossless_webp`, `progressive_jpeg`
+- `convert_file()` is thread-safe; atomic writes via temp file + `os.replace()` for in-place mode; post-save validation via `Image.verify()`; supports `in_place`, `skip_existing`, `resize_mode`/`resize_value`, `prefix`/`suffix`, `lossless_webp`, `progressive_jpeg`, `chroma_subsampling`, `convert_to_srgb`, `tiff_compression`, `png_compress_level`
+- `PRESETS` dict — built-in conversion presets (Web Optimized, Archive Quality, Mobile Friendly, Print/TIFF)
+- `_apply_dark_titlebar()` — uses DwmSetWindowAttribute for native dark title bar on Windows
+- `_on_log_context_menu()` — right-click menu for log panel with copy and open file location
 - `ScanWorker(QThread)` scans in background, accepts filtered extension set
 - `ConvertWorker(QThread)` manages ThreadPoolExecutor for parallel conversion, emits `current_file` signal
 - GUI updates via pyqtSignal
@@ -83,6 +101,8 @@ python heicshift.py
 - `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.4.0 — Atomic writes for in-place mode, output file validation, dark title bar, conversion presets, smart format-dependent option visibility, log context menu, source/output overlap guard, elapsed time + speed stats
+- v2.3.0 — Memory safety (try/finally in convert_file), drag & drop hover visual, completion sound, JPEG chroma subsampling toggle, sRGB color space conversion, TIFF compression, PNG compression level, output format tooltips
 - v2.2.0 — Image resize, filename prefix/suffix, progressive JPEG, lossless WebP, recent directories dropdown, dark scrollbar theming
 - v2.1.0 — Drag & drop, format filter, skip existing, EXIF auto-rotate, ETA progress, tray notifications, log export/clear, cross-platform open, PyInstaller CI/CD
 - v2.0.0 — Universal converter: add AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JP2, QOI, ICO support
@@ -90,7 +110,7 @@ python heicshift.py
 - v1.0.0 — Initial release
 
 ## Gotchas
-- iPhone HEIC files use Display P3 ICC profiles — passed through to output for correct color
+- iPhone HEIC files use Display P3 ICC profiles — passed through to output for correct color (or converted to sRGB with the new toggle)
 - JPEG cannot store transparency — auto mode falls back to PNG when alpha detected
 - pillow-heif on Windows uses bundled libheif; no system install needed
 - RAW files: metadata (EXIF) not preserved — rawpy does a full demosaic, no EXIF passthrough
@@ -98,3 +118,5 @@ python heicshift.py
 - Optional deps fail gracefully — those formats are excluded from scanning, logged on startup
 - EXIF auto-rotate uses `ImageOps.exif_transpose()` — refreshes EXIF bytes from transposed image to strip orientation tag
 - Format filter state persisted as JSON in QSettings
+- Atomic writes use `.heicshift.tmp` suffix — temp files cleaned on failure, absent on success
+- Source/output overlap guard blocks exact same dir but warns (not blocks) for subdirs since `source/converted` is the default pattern
