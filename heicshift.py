@@ -1,5 +1,5 @@
 """
-HEICShift v2.7.0 - High-performance universal image batch converter
+HEICShift v2.8.0 - High-performance universal image batch converter
 Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP,
 JPEG XL, RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG,
 WebP, AVIF, or TIFF. Auto-detects optimal format: PNG for images with
@@ -9,7 +9,7 @@ profiles, and XMP data. Supports CLI mode for headless/scripted operation.
 
 import sys, os, subprocess, importlib, platform, ctypes, argparse, shutil
 
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.8.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -105,7 +105,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QComboBox, QSpinBox, QSlider,
     QProgressBar, QPlainTextEdit, QCheckBox, QGroupBox, QGridLayout,
     QFrame, QSplitter, QStatusBar, QMessageBox, QLineEdit, QStyle,
-    QSizePolicy, QSystemTrayIcon, QMenu, QToolButton,
+    QSystemTrayIcon, QMenu, QToolButton, QScrollArea,
 )
 
 # ── Catppuccin Mocha Palette ──────────────────────────────────────────────────
@@ -680,7 +680,7 @@ def convert_file(
                 save_kwargs["exif"] = meta["exif"]
             if "icc_profile" in meta:
                 save_kwargs["icc_profile"] = meta["icc_profile"]
-            if "xmp" in meta and out_fmt in ("JPEG", "WEBP", "TIFF"):
+            if "xmp" in meta and out_fmt in ("JPEG", "WEBP", "TIFF", "AVIF", "JXL"):
                 save_kwargs["xmp"] = meta["xmp"]
 
         # Format-specific options
@@ -989,7 +989,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"HEICShift v{APP_VERSION}")
-        self.setMinimumSize(780, 700)
+        self.setMinimumSize(700, 520)
         self.resize(900, 800)
         self.setAcceptDrops(True)
 
@@ -1080,6 +1080,16 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(16, 12, 16, 8)
         root.setSpacing(10)
 
+        # ── Scroll area for controls ──
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(10)
+        scroll.setWidget(scroll_widget)
+
         # ── Header ──
         hdr = QHBoxLayout()
         title = QLabel("HEICShift")
@@ -1092,7 +1102,7 @@ class MainWindow(QMainWindow):
         desc = QLabel("Universal image batch converter with metadata preservation")
         desc.setObjectName("dimLabel")
         hdr.addWidget(desc)
-        root.addLayout(hdr)
+        scroll_layout.addLayout(hdr)
 
         # ── Source / Output ──
         io_group = QGroupBox("Directories")
@@ -1109,7 +1119,7 @@ class MainWindow(QMainWindow):
 
         self.recent_btn = QToolButton()
         self.recent_btn.setText("▾")
-        self.recent_btn.setFixedWidth(28)
+        self.recent_btn.setMinimumWidth(28)
         self.recent_btn.setToolTip("Recent directories")
         self._recent_menu = QMenu(self)
         self.recent_btn.setMenu(self._recent_menu)
@@ -1139,7 +1149,7 @@ class MainWindow(QMainWindow):
         self.inplace_chk.toggled.connect(self._on_inplace_toggled)
         io_grid.addWidget(self.inplace_chk, 3, 1, 1, 2)
 
-        root.addWidget(io_group)
+        scroll_layout.addWidget(io_group)
 
         # ── Input Format Filter ──
         filter_group = QGroupBox("Input Format Filter")
@@ -1163,11 +1173,18 @@ class MainWindow(QMainWindow):
                 col = 0
                 row += 1
 
-        root.addWidget(filter_group)
+        for c in range(5):
+            filter_layout.setColumnStretch(c, 1)
+
+        scroll_layout.addWidget(filter_group)
 
         # ── Conversion Options ──
         opt_group = QGroupBox("Conversion Settings")
         opt_grid = QGridLayout(opt_group)
+        opt_grid.setColumnStretch(0, 0)
+        opt_grid.setColumnStretch(1, 1)
+        opt_grid.setColumnStretch(2, 0)
+        opt_grid.setColumnStretch(3, 1)
 
         opt_grid.addWidget(QLabel("Output Format:"), 0, 0)
         self.fmt_combo = QComboBox()
@@ -1269,13 +1286,11 @@ class MainWindow(QMainWindow):
         opt_grid.addWidget(QLabel("Prefix:"), 5, 0)
         self.prefix_edit = QLineEdit()
         self.prefix_edit.setPlaceholderText("e.g. converted_")
-        self.prefix_edit.setMaximumWidth(180)
         opt_grid.addWidget(self.prefix_edit, 5, 1)
 
         opt_grid.addWidget(QLabel("Suffix:"), 5, 2)
         self.suffix_edit = QLineEdit()
         self.suffix_edit.setPlaceholderText("e.g. _web")
-        self.suffix_edit.setMaximumWidth(180)
         opt_grid.addWidget(self.suffix_edit, 5, 3)
 
         # ── Chroma Subsampling + sRGB ──
@@ -1294,7 +1309,6 @@ class MainWindow(QMainWindow):
         opt_grid.addWidget(self.tiff_comp_label, 7, 0)
         self.tiff_comp_combo = QComboBox()
         self.tiff_comp_combo.addItems(["None", "LZW", "Deflate"])
-        self.tiff_comp_combo.setMaximumWidth(180)
         opt_grid.addWidget(self.tiff_comp_combo, 7, 1)
 
         self.png_level_label = QLabel("PNG Compression:")
@@ -1303,14 +1317,13 @@ class MainWindow(QMainWindow):
         self.png_level_spin.setRange(1, 9)
         self.png_level_spin.setValue(6)
         self.png_level_spin.setToolTip("PNG compression level (1=fastest, 9=smallest)")
-        self.png_level_spin.setMaximumWidth(180)
         opt_grid.addWidget(self.png_level_spin, 7, 3)
 
         # Show/hide TIFF and PNG controls based on format selection
         self.fmt_combo.currentIndexChanged.connect(self._on_format_changed)
         self._on_format_changed(self.fmt_combo.currentIndex())
 
-        root.addWidget(opt_group)
+        scroll_layout.addWidget(opt_group)
 
         # ── Actions ──
         actions = QHBoxLayout()
@@ -1343,7 +1356,7 @@ class MainWindow(QMainWindow):
         self.open_output_btn.clicked.connect(self._open_output)
         actions.addWidget(self.open_output_btn)
 
-        root.addLayout(actions)
+        scroll_layout.addLayout(actions)
 
         # ── Stats bar ──
         stats_frame = QFrame()
@@ -1364,13 +1377,13 @@ class MainWindow(QMainWindow):
                   self.stat_skipped, self.stat_failed, self.stat_saved]:
             stats_layout.addWidget(w)
 
-        root.addWidget(stats_frame)
+        scroll_layout.addWidget(stats_frame)
 
         # ── Progress ──
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setValue(0)
-        root.addWidget(self.progress_bar)
+        scroll_layout.addWidget(self.progress_bar)
 
         # ── Log + controls ──
         log_header = QHBoxLayout()
@@ -1380,32 +1393,41 @@ class MainWindow(QMainWindow):
         log_header.addStretch()
 
         self.export_log_btn = QPushButton("Export Log")
-        self.export_log_btn.setFixedHeight(24)
         self.export_log_btn.setStyleSheet("font-size: 11px; padding: 2px 10px;")
         self.export_log_btn.clicked.connect(self._export_log)
         log_header.addWidget(self.export_log_btn)
 
         self.export_csv_btn = QPushButton("Export CSV")
-        self.export_csv_btn.setFixedHeight(24)
         self.export_csv_btn.setStyleSheet("font-size: 11px; padding: 2px 10px;")
         self.export_csv_btn.setToolTip("Export conversion results as a CSV report")
         self.export_csv_btn.clicked.connect(self._export_csv)
         log_header.addWidget(self.export_csv_btn)
 
         self.clear_log_btn = QPushButton("Clear")
-        self.clear_log_btn.setFixedHeight(24)
         self.clear_log_btn.setStyleSheet("font-size: 11px; padding: 2px 10px;")
         self.clear_log_btn.clicked.connect(self._clear_log)
         log_header.addWidget(self.clear_log_btn)
 
-        root.addLayout(log_header)
+        log_container = QWidget()
+        log_container_layout = QVBoxLayout(log_container)
+        log_container_layout.setContentsMargins(0, 0, 0, 0)
+        log_container_layout.setSpacing(4)
+        log_container_layout.addLayout(log_header)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
         self.log_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.log_view.customContextMenuRequested.connect(self._on_log_context_menu)
-        root.addWidget(self.log_view, 1)
+        log_container_layout.addWidget(self.log_view, 1)
+
+        # ── Splitter: controls scroll area + log ──
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(scroll)
+        splitter.addWidget(log_container)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        root.addWidget(splitter, 1)
 
         # ── Status bar ──
         self.status_bar = QStatusBar()
@@ -1654,7 +1676,7 @@ class MainWindow(QMainWindow):
         self.progressive_jpeg_chk.setVisible(is_auto or is_jpeg)
 
         # Lossless WebP: WebP, Auto
-        self.lossless_webp_chk.setVisible(is_auto or is_webp)
+        self.lossless_webp_chk.setVisible(is_webp)
 
         # TIFF compression: TIFF only
         self.tiff_comp_label.setVisible(is_tiff)
@@ -1672,12 +1694,14 @@ class MainWindow(QMainWindow):
     def _on_resize_mode_changed(self, idx: int):
         if idx == 0:  # Max Dimension
             self.resize_spin.setRange(100, 10000)
-            self.resize_spin.setValue(1920)
             self.resize_spin.setSuffix(" px")
+            if self.resize_spin.value() < 100:
+                self.resize_spin.setValue(1920)
         else:  # Scale
             self.resize_spin.setRange(1, 500)
-            self.resize_spin.setValue(50)
             self.resize_spin.setSuffix(" %")
+            if self.resize_spin.value() > 500:
+                self.resize_spin.setValue(50)
 
     # ── Log controls ──
     def _export_log(self):
@@ -2056,7 +2080,9 @@ class MainWindow(QMainWindow):
         if v := self.settings.value("dst"):
             self.dst_edit.setText(v)
         if (v := self.settings.value("fmt")) is not None:
-            self.fmt_combo.setCurrentIndex(int(v))
+            idx = int(v)
+            if 0 <= idx < self.fmt_combo.count():
+                self.fmt_combo.setCurrentIndex(idx)
         if (v := self.settings.value("quality")) is not None:
             self.quality_slider.setValue(int(v))
         if (v := self.settings.value("workers")) is not None:

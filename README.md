@@ -89,6 +89,7 @@ Optional decoders are installed automatically on first launch. If installation f
 - **Cancel support** — stop mid-conversion without corrupting output
 - **Settings persistence** — remembers all settings including format filter state across sessions
 - **Catppuccin Mocha dark theme** — including dark scrollbars and dark title bar
+- **Responsive UI scaling** — QScrollArea for controls, QSplitter between controls and log, works from 720p to 4K+
 - **Cross-platform** — native file manager integration on Windows, macOS, and Linux
 
 ## Installation

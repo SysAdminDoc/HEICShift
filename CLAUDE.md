@@ -129,6 +129,7 @@ python heicshift.py --version
 - `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.8.0 — XMP metadata passthrough for AVIF/JXL output, UI scaling (QScrollArea + QSplitter, reduced minimum size 700x520, column stretch for grid layouts), removed rigid pixel constraints (setMaximumWidth/setFixedHeight/setFixedWidth), lossless WebP checkbox hidden in Auto mode, resize mode preserves user values, format index bounds check on settings restore, QSizePolicy import removed
 - v2.7.0 — JPEG XL output format (pillow-jxl-plugin, conditional), CLI full parity (--tiff-compression, --png-level, --resize scale:VALUE), CLI progress counters + wall-clock time + files/sec, sorted scan results
 - v2.6.0 — AVIF output format (Pillow native AV1), CSV conversion report export, drag & drop individual files, CLI parity (--skip-existing, --progressive, --chroma-420, --lossless, --srgb, --prefix, --suffix, --no-structure), wall-clock time in done summary
 - v2.5.1 — JPEG/PNG input support (universal converter), same-format no-op skip guard
@@ -156,3 +157,8 @@ python heicshift.py --version
 - AVIF encoding quality defaults use same slider as JPEG/WebP (50-100), speed=6 (balanced)
 - JPEG XL output: quality maps to pillow-jxl-plugin `quality` param (1-100), effort=7 (good compression/speed tradeoff)
 - JPEG XL combo item disabled in GUI when pillow-jxl-plugin not installed; CLI exits with error code 2
+- Controls above the log panel are wrapped in QScrollArea — scrollable on small screens (720p/768p)
+- QSplitter between controls and log panel — user can drag the divider
+- Minimum window size is 700x520 (was 780x700); QScrollArea handles overflow
+- opt_grid and filter_layout have column stretch for proportional sizing on wide monitors
+- No rigid pixel constraints on prefix/suffix/tiff/png controls or log buttons
