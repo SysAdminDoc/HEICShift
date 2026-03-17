@@ -1,6 +1,6 @@
 # HEICShift
 
-High-performance HEIC/HEIF batch converter with a modern GUI. Scans directories recursively and converts to JPEG, PNG, WebP, or TIFF with full metadata preservation.
+Universal image batch converter with a modern GUI. Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF with full metadata preservation.
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -8,7 +8,7 @@ High-performance HEIC/HEIF batch converter with a modern GUI. Scans directories 
 
 ## Why HEICShift?
 
-Most HEIC converters get the details wrong — they strip metadata, mangle colors by dropping ICC profiles, or use lossy 4:2:0 chroma subsampling by default. HEICShift is built on research into what existing tools do poorly:
+Most image converters get the details wrong — they strip metadata, mangle colors by dropping ICC profiles, or use lossy 4:2:0 chroma subsampling by default. HEICShift is built on research into what existing tools do poorly:
 
 | Problem | Other Tools | HEICShift |
 |---|---|---|
@@ -17,17 +17,38 @@ Most HEIC converters get the details wrong — they strip metadata, mangle color
 | **Format selection** | Force you to pick JPEG or PNG for everything | Auto-detects: JPEG for photos, PNG only when transparency exists |
 | **Metadata** | Online converters and many CLI tools strip EXIF/GPS/timestamps | Preserves EXIF, ICC, and XMP data by default |
 | **Performance** | Single-threaded or limited concurrency | Parallel conversion with configurable worker count (up to 32) |
-| **HDR awareness** | Silently discard HDR gain maps without warning | Converts SDR base correctly; documents HDR limitations |
+| **Format coverage** | Most only handle HEIC or one format at a time | 10+ input format families from a single tool |
+
+## Supported Input Formats
+
+| Format | Extensions | Decoder | Install |
+|---|---|---|---|
+| HEIC/HEIF | `.heic` `.heif` `.hif` | pillow-heif | Auto |
+| AVIF | `.avif` | pillow-heif | Auto |
+| WebP | `.webp` | Pillow | Auto |
+| TIFF | `.tif` `.tiff` | Pillow | Auto |
+| BMP | `.bmp` | Pillow | Auto |
+| JPEG 2000 | `.jp2` `.j2k` `.jpx` | Pillow | Auto |
+| ICO/CUR | `.ico` `.cur` | Pillow | Auto |
+| JPEG XL | `.jxl` | pillow-jxl-plugin | Auto (optional) |
+| Camera RAW | `.cr2` `.cr3` `.nef` `.arw` `.dng` `.orf` `.rw2` `.raf` | rawpy/libraw | Auto (optional) |
+| QOI | `.qoi` | qoi | Auto (optional) |
+
+**Output formats:** JPEG, PNG, WebP, TIFF
+
+Optional decoders are installed automatically on first launch. If installation fails (e.g. no compiler for rawpy), those formats are skipped gracefully and the app logs which are unavailable.
 
 ## Features
 
 - **Auto format detection** — JPEG for photos, PNG when alpha channel is present
-- **5 output formats** — Auto, JPEG, PNG, WebP, TIFF
+- **10+ input formats** — HEIC, AVIF, WebP, JXL, RAW, TIFF, BMP, JP2, QOI, ICO
+- **In-place conversion** — convert next to the original and delete the source file
 - **Metadata preservation** — EXIF, ICC color profiles, XMP
 - **Parallel conversion** — 1–32 workers via ThreadPoolExecutor
 - **Recursive scanning** — processes entire directory trees
 - **Folder structure preservation** — mirrors source layout in output (optional)
 - **Quality control** — adjustable slider (50–100) for JPEG/WebP
+- **Scan breakdown** — shows count per format family after scanning
 - **Live stats** — files found, total size, converted, failed, space saved
 - **Embedded log** — per-file results with timing and size delta
 - **Cancel support** — stop mid-conversion without corrupting output
@@ -42,46 +63,47 @@ cd HEICShift
 python heicshift.py
 ```
 
-Dependencies (`Pillow`, `pillow-heif`, `PyQt6`) install automatically on first launch.
+All dependencies install automatically on first launch. No manual setup.
 
 ## Usage
 
-1. **Browse** to a directory containing `.heic` / `.heif` files
-2. **Scan** to discover all HEIC files (recursive by default)
+1. **Browse** to a directory containing image files
+2. **Scan** to discover all supported files (recursive by default)
 3. **Adjust settings** — format, quality, workers, metadata toggle
 4. **Convert All** — output goes to `source/converted/` by default
 
+Toggle **"Convert in place"** to save output next to each source file and delete the original.
+
 The log panel shows per-file results with size before/after and conversion time.
-
-## Supported Formats
-
-| Input | Output |
-|---|---|
-| `.heic`, `.heif`, `.hif` | `.jpg`, `.png`, `.webp`, `.tiff` |
 
 ## How It Works
 
 ```
 Source Directory          HEICShift                    Output
- photos/                   pillow-heif decoder           converted/
-  ├─ IMG_001.heic   ──→   Pillow processing      ──→    ├─ IMG_001.jpg
-  ├─ IMG_002.HEIF   ──→   EXIF/ICC passthrough   ──→    ├─ IMG_002.jpg
-  └─ screenshots/          ThreadPoolExecutor             └─ screenshots/
-      └─ shot.heic  ──→   Alpha? → PNG, else JPEG ──→       └─ shot.png
+ photos/                                                converted/
+  ├─ IMG_001.heic   ──→  pillow-heif decoder    ──→    ├─ IMG_001.jpg
+  ├─ IMG_002.avif   ──→  Pillow processing      ──→    ├─ IMG_002.jpg
+  ├─ shot.webp      ──→  EXIF/ICC passthrough   ──→    ├─ shot.jpg
+  ├─ photo.cr2      ──→  rawpy demosaic         ──→    ├─ photo.jpg
+  └─ render.qoi     ──→  qoi decoder            ──→    └─ render.jpg
 ```
 
 ## Tech Stack
 
-- **[pillow-heif](https://github.com/bigcat88/pillow_heif)** — HEIC/HEIF decoding with full metadata support
-- **[Pillow](https://python-pillow.org/)** — image processing and format output
+- **[pillow-heif](https://github.com/bigcat88/pillow_heif)** — HEIC/HEIF/AVIF decoding
+- **[pillow-jxl-plugin](https://github.com/niclas-niclas/pillow-jxl-plugin)** — JPEG XL decoding (optional)
+- **[rawpy](https://github.com/letmaik/rawpy)** — Camera RAW demosaicing via libraw (optional)
+- **[qoi](https://github.com/kodonnell/qoi)** — QOI format decoding (optional)
+- **[Pillow](https://python-pillow.org/)** — image processing, WebP/TIFF/BMP/JP2/ICO decoding, output encoding
 - **[PyQt6](https://www.riverbankcomputing.com/software/pyqt/)** — GUI framework
-- **ThreadPoolExecutor** — parallel file conversion
 
 ## Known Limitations
 
-- HDR gain maps embedded in HEIC files are lost during conversion (no JPEG/PNG equivalent exists). For HDR workflows, keep originals.
-- Apple Live Photo motion data and depth maps cannot be preserved in any static format.
-- HEIC files with odd pixel dimensions may produce artifacts in some downstream decoders — this is a libheif/codec limitation, not a HEICShift issue.
+- **HDR gain maps** in HEIC files are lost during conversion (no JPEG/PNG equivalent). Keep originals for HDR workflows.
+- **Apple Live Photo** motion data and depth maps cannot be preserved in any static format.
+- **Camera RAW metadata** — rawpy performs a full demosaic; EXIF is not carried through. Use ExifTool as a post-pass if needed.
+- **QOI** has no metadata support by design — nothing to preserve.
+- **HEIC odd dimensions** may produce artifacts in some downstream decoders (libheif/codec limitation).
 
 ## License
 

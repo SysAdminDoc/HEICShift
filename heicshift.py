@@ -1,13 +1,14 @@
 """
-HEICShift v1.1.0 - High-performance HEIC batch converter
-Scans directories recursively and converts .HEIC/.HEIF files to JPEG or PNG.
+HEICShift v2.0.0 - High-performance image batch converter
+Scans directories recursively and converts HEIC, AVIF, WebP, JPEG XL, RAW,
+TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, or TIFF.
 Auto-detects optimal format: PNG for images with transparency, JPEG for photos.
 Preserves EXIF metadata, ICC color profiles, and XMP data.
 """
 
 import sys, os, subprocess, importlib
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "2.0.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -30,6 +31,26 @@ def _bootstrap():
                 except subprocess.CalledProcessError:
                     continue
 
+    # Optional deps — best-effort install, graceful fallback
+    optional = {
+        "rawpy": "rawpy",
+        "pillow_jxl": "pillow-jxl-plugin",
+        "qoi": "qoi",
+    }
+    for module, package in optional.items():
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            for cmd_extra in [[], ["--user"], ["--break-system-packages"]]:
+                try:
+                    subprocess.check_call(
+                        [sys.executable, "-m", "pip", "install", package, "-q"] + cmd_extra,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    break
+                except subprocess.CalledProcessError:
+                    continue
+
 _bootstrap()
 
 import time
@@ -39,10 +60,35 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
+import numpy as np
 from PIL import Image, ImageCms
 from pillow_heif import register_heif_opener
 
 register_heif_opener()
+
+# Optional: JPEG XL plugin (registers into Pillow automatically on import)
+HAS_JXL = False
+try:
+    import pillow_jxl  # noqa: F401
+    HAS_JXL = True
+except ImportError:
+    pass
+
+# Optional: RAW format support via rawpy (wraps libraw)
+HAS_RAWPY = False
+try:
+    import rawpy
+    HAS_RAWPY = True
+except ImportError:
+    pass
+
+# Optional: QOI format support
+HAS_QOI = False
+try:
+    import qoi as qoi_lib
+    HAS_QOI = True
+except ImportError:
+    pass
 
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSettings, QSize,
@@ -260,6 +306,49 @@ QFrame#separator {{
 """
 
 
+# ── Supported Input Formats ───────────────────────────────────────────────────
+
+# Always available (pillow-heif plugin)
+HEIC_EXTS = {".heic", ".heif", ".hif"}
+AVIF_EXTS = {".avif"}
+
+# Always available (Pillow built-in)
+WEBP_EXTS  = {".webp"}
+TIFF_EXTS  = {".tif", ".tiff"}
+BMP_EXTS   = {".bmp"}
+JP2_EXTS   = {".jp2", ".j2k", ".jpx"}
+ICO_EXTS   = {".ico", ".cur"}
+
+# Conditional on optional deps
+JXL_EXTS = {".jxl"}
+RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".raf"}
+QOI_EXTS = {".qoi"}
+
+
+def get_supported_extensions() -> set[str]:
+    """Return all input extensions we can currently decode."""
+    exts = HEIC_EXTS | AVIF_EXTS | WEBP_EXTS | TIFF_EXTS | BMP_EXTS | JP2_EXTS | ICO_EXTS
+    if HAS_JXL:
+        exts |= JXL_EXTS
+    if HAS_RAWPY:
+        exts |= RAW_EXTS
+    if HAS_QOI:
+        exts |= QOI_EXTS
+    return exts
+
+
+def get_format_support_summary() -> str:
+    """Human-readable list of supported format families."""
+    families = ["HEIC/HEIF", "AVIF", "WebP", "TIFF", "BMP", "JPEG 2000", "ICO/CUR"]
+    if HAS_JXL:
+        families.append("JPEG XL")
+    if HAS_RAWPY:
+        families.append("Camera RAW")
+    if HAS_QOI:
+        families.append("QOI")
+    return ", ".join(families)
+
+
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -282,15 +371,14 @@ class ScanResult:
 
 # ── Conversion Engine ─────────────────────────────────────────────────────────
 
-HEIC_EXTENSIONS = {".heic", ".heif", ".hif"}
-
 def scan_directory(root: Path, recursive: bool = True) -> ScanResult:
-    """Find all HEIC/HEIF files in directory."""
+    """Find all supported image files in directory."""
     t0 = time.perf_counter()
+    supported = get_supported_extensions()
     result = ScanResult()
     pattern = "**/*" if recursive else "*"
     for p in root.glob(pattern):
-        if p.is_file() and p.suffix.lower() in HEIC_EXTENSIONS:
+        if p.is_file() and p.suffix.lower() in supported:
             result.files.append(p)
             result.total_size += p.stat().st_size
     result.elapsed = time.perf_counter() - t0
@@ -306,6 +394,42 @@ def has_transparency(img: Image.Image) -> bool:
     return False
 
 
+def _open_image(src: Path) -> tuple[Image.Image, dict]:
+    """Open an image file, routing to the correct decoder.
+
+    Returns (PIL Image, metadata_dict).
+    metadata_dict contains 'exif', 'icc_profile', 'xmp' when available.
+    """
+    suffix = src.suffix.lower()
+    meta = {}
+
+    if suffix in RAW_EXTS and HAS_RAWPY:
+        raw = rawpy.imread(str(src))
+        rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
+        raw.close()
+        img = Image.fromarray(rgb)
+        # RAW files don't carry EXIF through rawpy — metadata not available
+        return img, meta
+
+    if suffix in QOI_EXTS and HAS_QOI:
+        arr = qoi_lib.read(str(src))
+        img = Image.fromarray(arr)
+        return img, meta
+
+    # Everything else goes through Pillow (+ plugins: pillow-heif, pillow-jxl)
+    img = Image.open(str(src))
+
+    # Extract metadata from Pillow's info dict
+    if exif := img.info.get("exif"):
+        meta["exif"] = exif
+    if icc := img.info.get("icc_profile"):
+        meta["icc_profile"] = icc
+    if xmp := img.info.get("xmp"):
+        meta["xmp"] = xmp
+
+    return img, meta
+
+
 def convert_file(
     src: Path,
     output_dir: Path,
@@ -316,12 +440,12 @@ def convert_file(
     base_dir: Path | None = None,
     in_place: bool = False,
 ) -> ConvertResult:
-    """Convert a single HEIC file. Thread-safe."""
+    """Convert a single image file. Thread-safe."""
     t0 = time.perf_counter()
     result = ConvertResult(src=src, size_before=src.stat().st_size)
 
     try:
-        img = Image.open(str(src))
+        img, meta = _open_image(src)
 
         # Determine output format
         if fmt == "auto":
@@ -360,16 +484,13 @@ def convert_file(
 
         # Gather metadata
         save_kwargs = {}
-        if preserve_metadata:
-            exif = img.info.get("exif")
-            icc = img.info.get("icc_profile")
-            xmp = img.info.get("xmp")
-            if exif:
-                save_kwargs["exif"] = exif
-            if icc:
-                save_kwargs["icc_profile"] = icc
-            if xmp and out_fmt in ("JPEG", "WEBP", "TIFF"):
-                save_kwargs["xmp"] = xmp
+        if preserve_metadata and meta:
+            if "exif" in meta:
+                save_kwargs["exif"] = meta["exif"]
+            if "icc_profile" in meta:
+                save_kwargs["icc_profile"] = meta["icc_profile"]
+            if "xmp" in meta and out_fmt in ("JPEG", "WEBP", "TIFF"):
+                save_kwargs["xmp"] = meta["xmp"]
 
         # Format-specific options
         if out_fmt == "JPEG":
@@ -391,7 +512,7 @@ def convert_file(
         result.size_after = out_path.stat().st_size
         result.success = True
 
-        # In-place mode: delete the original HEIC after successful conversion
+        # In-place mode: delete the original after successful conversion
         if in_place and result.success:
             src.unlink()
             result.src_deleted = True
@@ -488,7 +609,7 @@ class ScanWorker(QThread):
         self.log.emit(f"Scanning {'recursively' if self.recursive else ''}: {self.directory}")
         result = scan_directory(self.directory, self.recursive)
         self.log.emit(
-            f"Found {len(result.files)} HEIC files "
+            f"Found {len(result.files)} supported files "
             f"({_fmt_size(result.total_size)}) in {result.elapsed:.2f}s"
         )
         self.finished.emit(result)
@@ -510,8 +631,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"HEICShift v{APP_VERSION}")
-        self.setMinimumSize(780, 680)
-        self.resize(880, 750)
+        self.setMinimumSize(780, 700)
+        self.resize(900, 780)
 
         self.settings = QSettings("HEICShift", "HEICShift")
         self._scan_result: ScanResult | None = None
@@ -520,6 +641,24 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._restore_state()
+        self._log_startup()
+
+    def _log_startup(self):
+        """Log supported formats and optional dep status on launch."""
+        self._log(f"HEICShift v{APP_VERSION}")
+        self._log(f"Supported input formats: {get_format_support_summary()}")
+        missing = []
+        if not HAS_JXL:
+            missing.append("JPEG XL (pip install pillow-jxl-plugin)")
+        if not HAS_RAWPY:
+            missing.append("Camera RAW (pip install rawpy)")
+        if not HAS_QOI:
+            missing.append("QOI (pip install qoi)")
+        if missing:
+            self._log(f"Optional formats unavailable: {', '.join(missing)}")
+        exts = sorted(get_supported_extensions())
+        self._log(f"Scanning for: {' '.join(exts)}")
+        self._log("")
 
     def _build_ui(self):
         central = QWidget()
@@ -537,7 +676,7 @@ class MainWindow(QMainWindow):
         hdr.addWidget(title)
         hdr.addWidget(ver)
         hdr.addStretch()
-        desc = QLabel("HEIC/HEIF batch converter with metadata preservation")
+        desc = QLabel("Universal image batch converter with metadata preservation")
         desc.setObjectName("dimLabel")
         hdr.addWidget(desc)
         root.addLayout(hdr)
@@ -549,7 +688,7 @@ class MainWindow(QMainWindow):
 
         io_grid.addWidget(QLabel("Source:"), 0, 0)
         self.src_edit = QLineEdit()
-        self.src_edit.setPlaceholderText("Select a directory containing HEIC files...")
+        self.src_edit.setPlaceholderText("Select a directory containing image files...")
         io_grid.addWidget(self.src_edit, 0, 1)
         self.src_btn = QPushButton("Browse")
         self.src_btn.clicked.connect(self._browse_source)
@@ -571,7 +710,7 @@ class MainWindow(QMainWindow):
         self.structure_chk.setChecked(True)
         io_grid.addWidget(self.structure_chk, 2, 2)
 
-        self.inplace_chk = QCheckBox("Convert in place (save next to original, delete HEIC)")
+        self.inplace_chk = QCheckBox("Convert in place (save next to original, delete source)")
         self.inplace_chk.setChecked(False)
         self.inplace_chk.setStyleSheet(f"color: {CAT['peach']};")
         self.inplace_chk.toggled.connect(self._on_inplace_toggled)
@@ -750,11 +889,37 @@ class MainWindow(QMainWindow):
 
         if result.files:
             self.convert_btn.setEnabled(True)
+            # Count by format family
+            ext_counts: dict[str, int] = {}
+            for f in result.files:
+                s = f.suffix.lower()
+                if s in HEIC_EXTS:
+                    ext_counts["HEIC"] = ext_counts.get("HEIC", 0) + 1
+                elif s in AVIF_EXTS:
+                    ext_counts["AVIF"] = ext_counts.get("AVIF", 0) + 1
+                elif s in WEBP_EXTS:
+                    ext_counts["WebP"] = ext_counts.get("WebP", 0) + 1
+                elif s in JXL_EXTS:
+                    ext_counts["JXL"] = ext_counts.get("JXL", 0) + 1
+                elif s in RAW_EXTS:
+                    ext_counts["RAW"] = ext_counts.get("RAW", 0) + 1
+                elif s in TIFF_EXTS:
+                    ext_counts["TIFF"] = ext_counts.get("TIFF", 0) + 1
+                elif s in BMP_EXTS:
+                    ext_counts["BMP"] = ext_counts.get("BMP", 0) + 1
+                elif s in JP2_EXTS:
+                    ext_counts["JP2"] = ext_counts.get("JP2", 0) + 1
+                elif s in QOI_EXTS:
+                    ext_counts["QOI"] = ext_counts.get("QOI", 0) + 1
+                elif s in ICO_EXTS:
+                    ext_counts["ICO"] = ext_counts.get("ICO", 0) + 1
+            breakdown = ", ".join(f"{v} {k}" for k, v in sorted(ext_counts.items(), key=lambda x: -x[1]))
+            self._log(f"Breakdown: {breakdown}")
             self.status_bar.showMessage(
                 f"Found {len(result.files)} files ({_fmt_size(result.total_size)}). Ready to convert."
             )
         else:
-            self.status_bar.showMessage("No HEIC/HEIF files found.")
+            self.status_bar.showMessage("No supported image files found.")
 
     # ── Convert ──
     def _convert(self):
@@ -764,7 +929,6 @@ class MainWindow(QMainWindow):
         in_place = self.inplace_chk.isChecked()
 
         if in_place:
-            # Output dir unused in in-place mode, but we need a valid Path
             dst = self.src_edit.text().strip()
         else:
             dst = self.dst_edit.text().strip()
@@ -791,7 +955,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Converting...")
 
         if in_place:
-            self._log(f"In-place mode: converted files saved next to originals, HEIC sources will be deleted")
+            self._log("In-place mode: converted files saved next to originals, source files will be deleted")
 
         self._worker = ConvertWorker(
             files=self._scan_result.files,
@@ -842,7 +1006,7 @@ class MainWindow(QMainWindow):
         total_time = sum(r.elapsed for r in results)
         saved = sum(r.size_before - r.size_after for r in results if r.success)
 
-        deleted_msg = f", {deleted} HEIC sources deleted" if deleted else ""
+        deleted_msg = f", {deleted} sources deleted" if deleted else ""
         summary = (
             f"Done! {ok} converted, {fail} failed{deleted_msg}. "
             f"Space {'saved' if saved >= 0 else 'added'}: {_fmt_size(abs(saved))}. "
