@@ -1,5 +1,5 @@
 """
-HEICShift v2.6.0 - High-performance universal image batch converter
+HEICShift v2.7.0 - High-performance universal image batch converter
 Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP,
 JPEG XL, RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG,
 WebP, AVIF, or TIFF. Auto-detects optimal format: PNG for images with
@@ -9,7 +9,7 @@ profiles, and XMP data. Supports CLI mode for headless/scripted operation.
 
 import sys, os, subprocess, importlib, platform, ctypes, argparse, shutil
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 
 def _bootstrap():
     """Auto-install dependencies before imports."""
@@ -476,6 +476,7 @@ def scan_directory(root: Path, recursive: bool = True, extensions: set[str] | No
         if p.is_file() and p.suffix.lower() in supported:
             result.files.append(p)
             result.total_size += p.stat().st_size
+    result.files.sort()
     result.elapsed = time.perf_counter() - t0
     return result
 
@@ -613,6 +614,10 @@ def convert_file(
             out_fmt = "TIFF"
         elif fmt == "avif":
             out_fmt = "AVIF"
+        elif fmt == "jxl":
+            if not HAS_JXL:
+                raise RuntimeError("JPEG XL output requires pillow-jxl-plugin (pip install pillow-jxl-plugin)")
+            out_fmt = "JXL"
         else:
             out_fmt = "JPEG"
 
@@ -625,6 +630,7 @@ def convert_file(
             or (out_fmt == "WEBP" and src_ext in WEBP_EXTS)
             or (out_fmt == "AVIF" and src_ext in AVIF_EXTS)
             or (out_fmt == "TIFF" and src_ext in TIFF_EXTS)
+            or (out_fmt == "JXL" and src_ext in JXL_EXTS)
         )
         no_processing = (
             resize_mode == "none"
@@ -637,7 +643,7 @@ def convert_file(
             result.elapsed = time.perf_counter() - t0
             return result
 
-        ext_map = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "AVIF": ".avif", "TIFF": ".tiff"}
+        ext_map = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "AVIF": ".avif", "TIFF": ".tiff", "JXL": ".jxl"}
         ext = ext_map.get(out_fmt, ".jpg")
 
         # Build output path — in-place writes next to the source file
@@ -703,6 +709,9 @@ def convert_file(
         elif out_fmt == "AVIF":
             save_kwargs["quality"] = jpeg_quality
             save_kwargs["speed"] = 6
+        elif out_fmt == "JXL":
+            save_kwargs["quality"] = jpeg_quality
+            save_kwargs["effort"] = 7
 
         # Atomic write: use temp file for in-place mode
         if in_place:
@@ -965,7 +974,7 @@ PRESETS = {
 
 # ── Disk Space Estimation ─────────────────────────────────────────────────────
 
-SIZE_ESTIMATE_FACTORS = {"jpeg": 0.8, "auto": 0.8, "png": 1.2, "webp": 0.7, "avif": 0.5, "tiff": 1.5}
+SIZE_ESTIMATE_FACTORS = {"jpeg": 0.8, "auto": 0.8, "png": 1.2, "webp": 0.7, "avif": 0.5, "tiff": 1.5, "jxl": 0.45}
 
 
 def _estimate_output_size(total_input_bytes: int, fmt: str) -> int:
@@ -1164,7 +1173,7 @@ class MainWindow(QMainWindow):
         self.fmt_combo = QComboBox()
         self.fmt_combo.addItems([
             "Auto (JPEG for photos, PNG for transparency)",
-            "JPEG", "PNG", "WebP", "AVIF", "TIFF"
+            "JPEG", "PNG", "WebP", "AVIF", "TIFF", "JPEG XL"
         ])
         self.fmt_combo.setItemData(0, "JPEG for photos, PNG when transparency exists", Qt.ItemDataRole.ToolTipRole)
         self.fmt_combo.setItemData(1, "Best for photographs, lossy compression", Qt.ItemDataRole.ToolTipRole)
@@ -1172,6 +1181,12 @@ class MainWindow(QMainWindow):
         self.fmt_combo.setItemData(3, "Modern format, smaller files", Qt.ItemDataRole.ToolTipRole)
         self.fmt_combo.setItemData(4, "Next-gen AV1 codec, best compression ratio", Qt.ItemDataRole.ToolTipRole)
         self.fmt_combo.setItemData(5, "Lossless, professional workflows", Qt.ItemDataRole.ToolTipRole)
+        if HAS_JXL:
+            self.fmt_combo.setItemData(6, "Next-gen JPEG replacement, best quality-to-size ratio", Qt.ItemDataRole.ToolTipRole)
+        else:
+            model = self.fmt_combo.model()
+            model.item(6).setEnabled(False)
+            self.fmt_combo.setItemData(6, "Requires pillow-jxl-plugin (pip install pillow-jxl-plugin)", Qt.ItemDataRole.ToolTipRole)
         opt_grid.addWidget(self.fmt_combo, 0, 1, 1, 2)
 
         self._preset_btn = QToolButton()
@@ -1461,6 +1476,7 @@ class MainWindow(QMainWindow):
                 files.append(p)
 
         if files:
+            files.sort()
             total_size = sum(f.stat().st_size for f in files)
             self._scan_result = ScanResult(files=files, total_size=total_size, elapsed=0)
             common_parent = str(Path(os.path.commonpath([str(f.parent) for f in files])))
@@ -1604,16 +1620,17 @@ class MainWindow(QMainWindow):
     # ── Format-dependent controls ──
     def _on_format_changed(self, idx: int):
         """Show/hide format-specific controls based on selected output format."""
-        # idx: 0=Auto, 1=JPEG, 2=PNG, 3=WebP, 4=AVIF, 5=TIFF
+        # idx: 0=Auto, 1=JPEG, 2=PNG, 3=WebP, 4=AVIF, 5=TIFF, 6=JPEG XL
         is_auto = idx == 0
         is_jpeg = idx == 1
         is_png = idx == 2
         is_webp = idx == 3
         is_avif = idx == 4
         is_tiff = idx == 5
+        is_jxl = idx == 6
 
-        # Quality slider: JPEG, WebP, AVIF, Auto
-        show_quality = is_auto or is_jpeg or is_webp or is_avif
+        # Quality slider: JPEG, WebP, AVIF, JXL, Auto
+        show_quality = is_auto or is_jpeg or is_webp or is_avif or is_jxl
         self.quality_desc_label.setVisible(show_quality)
         self.quality_slider.setVisible(show_quality)
         self.quality_label.setVisible(show_quality)
@@ -1625,6 +1642,8 @@ class MainWindow(QMainWindow):
             self.quality_desc_label.setText("WebP Quality:")
         elif is_avif:
             self.quality_desc_label.setText("AVIF Quality:")
+        elif is_jxl:
+            self.quality_desc_label.setText("JXL Quality:")
         else:
             self.quality_desc_label.setText("JPEG/WebP Quality:")
 
@@ -1802,7 +1821,7 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError):
                 pass
 
-        fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "avif", 5: "tiff"}
+        fmt_map = {0: "auto", 1: "jpeg", 2: "png", 3: "webp", 4: "avif", 5: "tiff", 6: "jxl"}
         fmt = fmt_map.get(self.fmt_combo.currentIndex(), "auto")
 
         # Disk space pre-check
@@ -2119,7 +2138,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("-i", "--input", type=str, help="Source directory to scan")
     p.add_argument("-o", "--output", type=str, help="Output directory (default: <input>/converted)")
     p.add_argument("-f", "--format", type=str, default="auto",
-                   choices=["auto", "jpeg", "png", "webp", "avif", "tiff"],
+                   choices=["auto", "jpeg", "png", "webp", "avif", "tiff", "jxl"],
                    help="Output format (default: auto)")
     p.add_argument("-q", "--quality", type=int, default=92, help="JPEG/WebP quality 50-100 (default: 92)")
     p.add_argument("-w", "--workers", type=int, default=min(os.cpu_count() or 4, 8),
@@ -2131,8 +2150,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Only scan top-level directory")
     p.add_argument("--dry-run", action="store_true", help="List files that would be converted, then exit")
     p.add_argument("--strip-metadata", action="store_true", help="Remove all metadata from output files")
-    p.add_argument("--resize", type=str, default=None, metavar="max_dim:VALUE",
-                   help="Resize by max dimension, e.g. max_dim:1920")
+    p.add_argument("--resize", type=str, default=None, metavar="MODE:VALUE",
+                   help="Resize images, e.g. max_dim:1920 or scale:50")
     p.add_argument("--skip-existing", action="store_true",
                    help="Skip files where output already exists")
     p.add_argument("--progressive", action="store_true",
@@ -2147,6 +2166,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Prepend text to output filenames")
     p.add_argument("--suffix", type=str, default="",
                    help="Append text to output filenames")
+    p.add_argument("--tiff-compression", type=str, default="none",
+                   choices=["none", "lzw", "deflate"],
+                   help="TIFF compression method (default: none)")
+    p.add_argument("--png-level", type=int, default=6,
+                   help="PNG compression level 1-9 (default: 6)")
     p.add_argument("--no-structure", action="store_true",
                    help="Flatten output (no subdirectory mirroring)")
     return p
@@ -2196,12 +2220,24 @@ def _run_cli(args):
     if args.lossless: flags.append("lossless")
     if args.srgb: flags.append("sRGB")
     if args.no_structure: flags.append("flatten")
+    if args.tiff_compression != "none": flags.append(f"tiff-{args.tiff_compression}")
+    if args.png_level != 6: flags.append(f"png-level:{args.png_level}")
     if flags:
         print(f"Options: {', '.join(flags)}")
     if args.prefix:
         print(f"Prefix: '{args.prefix}'")
     if args.suffix:
         print(f"Suffix: '{args.suffix}'")
+
+    # Validate JXL dependency
+    if args.format == "jxl" and not HAS_JXL:
+        print("[ERROR] JPEG XL output requires pillow-jxl-plugin (pip install pillow-jxl-plugin)")
+        sys.exit(2)
+
+    # Validate PNG compression level
+    if args.png_level < 1 or args.png_level > 9:
+        print(f"[ERROR] PNG compression level must be 1-9, got {args.png_level}")
+        sys.exit(2)
 
     # Parse resize
     resize_mode = "none"
@@ -2212,8 +2248,11 @@ def _run_cli(args):
             if len(parts) == 2 and parts[0] == "max_dim":
                 resize_mode = "max_dim"
                 resize_value = int(parts[1])
+            elif len(parts) == 2 and parts[0] == "scale":
+                resize_mode = "scale"
+                resize_value = int(parts[1])
             else:
-                print(f"[ERROR] Invalid resize format: {args.resize} (use max_dim:VALUE)")
+                print(f"[ERROR] Invalid resize format: {args.resize} (use max_dim:VALUE or scale:VALUE)")
                 sys.exit(2)
         except ValueError:
             print(f"[ERROR] Invalid resize value: {args.resize}")
@@ -2261,8 +2300,11 @@ def _run_cli(args):
     fail_count = 0
     skip_count = 0
     total = len(scan.files)
+    done_count = 0
 
     print(f"\nConverting {total} files with {args.workers} workers...\n")
+
+    t0 = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {}
@@ -2272,33 +2314,36 @@ def _run_cli(args):
                 preserve_meta, not args.no_structure, input_dir, args.in_place,
                 args.skip_existing, resize_mode, resize_value,
                 args.prefix, args.suffix, args.lossless, args.progressive,
-                args.chroma_420, args.srgb, "none", 6,
+                args.chroma_420, args.srgb, args.tiff_compression, args.png_level,
             )
             futures[fut] = f
 
         for fut in as_completed(futures):
             result = fut.result()
+            done_count += 1
             if result.skipped:
                 skip_count += 1
-                print(f"[SKIP] {result.src.name}")
+                print(f"[SKIP] ({done_count}/{total}) {result.src.name}")
             elif result.success:
                 ok_count += 1
                 saved = result.size_before - result.size_after
                 pct = (saved / result.size_before * 100) if result.size_before else 0
                 deleted_tag = "  [source deleted]" if result.src_deleted else ""
                 print(
-                    f"[OK] {result.src.name} -> {result.dst.name}  "
+                    f"[OK] ({done_count}/{total}) {result.src.name} -> {result.dst.name}  "
                     f"({_fmt_size(result.size_before)} -> {_fmt_size(result.size_after)}, "
                     f"{pct:+.1f}%)  [{result.elapsed:.2f}s]{deleted_tag}"
                 )
             else:
                 fail_count += 1
-                print(f"[FAIL] {result.src.name}: {result.error}")
+                print(f"[FAIL] ({done_count}/{total}) {result.src.name}: {result.error}")
 
             for warn in result.warnings:
                 print(f"[WARN] {result.src.name}: {warn}")
 
-    print(f"\nDone: {ok_count} converted, {fail_count} failed, {skip_count} skipped")
+    wall_time = time.perf_counter() - t0
+    speed = ok_count / wall_time if wall_time > 0 else 0
+    print(f"\nDone: {ok_count} converted, {fail_count} failed, {skip_count} skipped in {wall_time:.0f}s ({speed:.1f} files/sec)")
 
     if fail_count == total:
         sys.exit(2)

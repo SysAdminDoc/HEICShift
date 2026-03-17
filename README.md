@@ -1,6 +1,6 @@
 # HEICShift
 
-Universal image batch converter with a modern GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, AVIF, or TIFF with full metadata preservation.
+Universal image batch converter with a modern GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG, WebP, AVIF, TIFF, or JPEG XL with full metadata preservation.
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -36,7 +36,7 @@ Most image converters get the details wrong — they strip metadata, mangle colo
 | Camera RAW | `.cr2` `.cr3` `.nef` `.arw` `.dng` `.orf` `.rw2` `.raf` | rawpy/libraw | Auto (optional) |
 | QOI | `.qoi` | qoi | Auto (optional) |
 
-**Output formats:** JPEG, PNG, WebP, AVIF, TIFF
+**Output formats:** JPEG, PNG, WebP, AVIF, TIFF, JPEG XL
 
 Optional decoders are installed automatically on first launch. If installation fails (e.g. no compiler for rawpy), those formats are skipped gracefully and the app logs which are unavailable.
 
@@ -46,6 +46,7 @@ Optional decoders are installed automatically on first launch. If installation f
 - **12+ input formats** — JPEG, PNG, HEIC, AVIF, WebP, JXL, RAW, TIFF, BMP, JP2, QOI, ICO
 - **Cross-format conversion** — convert between any formats (JPEG to WebP, PNG to JPEG, etc.); same-format no-ops auto-skipped
 - **AVIF output** — next-gen AV1 codec via Pillow's native encoder, best compression ratio
+- **JPEG XL output** — next-gen JPEG replacement via pillow-jxl-plugin (quality + effort tuning)
 - **CSV export** — structured conversion report with per-file status, sizes, timing, and warnings
 - **CLI mode** — headless conversion via `--input` flag with full feature parity (all GUI options exposed as flags)
 - **In-place conversion** — convert next to the original and delete the source file
@@ -137,6 +138,15 @@ python heicshift.py --input ./photos --strip-metadata --resize max_dim:1920
 # Convert to AVIF with sRGB color conversion
 python heicshift.py --input ./photos --format avif --srgb
 
+# Convert to JPEG XL (requires pillow-jxl-plugin)
+python heicshift.py --input ./photos --format jxl --quality 90
+
+# Resize by scale percentage
+python heicshift.py --input ./photos --resize scale:50
+
+# TIFF with LZW compression
+python heicshift.py --input ./photos --format tiff --tiff-compression lzw
+
 # Progressive JPEG with filename prefix, skip already-converted
 python heicshift.py -i ./photos -f jpeg --progressive --prefix "web_" --skip-existing
 
@@ -150,7 +160,7 @@ python heicshift.py --version
 |---|---|
 | `-i`, `--input` | Source directory (enables CLI mode) |
 | `-o`, `--output` | Output directory (default: `<input>/converted`) |
-| `-f`, `--format` | Output format: `auto`, `jpeg`, `png`, `webp`, `avif`, `tiff` |
+| `-f`, `--format` | Output format: `auto`, `jpeg`, `png`, `webp`, `avif`, `tiff`, `jxl` |
 | `-q`, `--quality` | JPEG/WebP quality 50–100 (default: 92) |
 | `-w`, `--workers` | Parallel worker count (default: min(cpu_count, 8)) |
 | `--in-place` | Convert next to originals, delete source |
@@ -158,7 +168,7 @@ python heicshift.py --version
 | `--no-recursive` | Only scan top-level directory |
 | `--dry-run` | List files and exit without converting |
 | `--strip-metadata` | Remove all EXIF/ICC/XMP from output |
-| `--resize` | Resize by max dimension, e.g. `max_dim:1920` |
+| `--resize` | Resize images, e.g. `max_dim:1920` or `scale:50` |
 | `--skip-existing` | Skip files where output already exists |
 | `--progressive` | Save JPEGs as progressive |
 | `--chroma-420` | Use 4:2:0 chroma subsampling for JPEG |
@@ -166,6 +176,8 @@ python heicshift.py --version
 | `--srgb` | Convert embedded ICC profiles to sRGB |
 | `--prefix` | Prepend text to output filenames |
 | `--suffix` | Append text to output filenames |
+| `--tiff-compression` | TIFF compression: `none`, `lzw`, `deflate` (default: none) |
+| `--png-level` | PNG compression level 1–9 (default: 6) |
 | `--no-structure` | Flatten output (no subdirectory mirroring) |
 | `--version` | Print version and exit |
 

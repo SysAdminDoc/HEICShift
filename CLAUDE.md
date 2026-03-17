@@ -1,7 +1,7 @@
 # HEICShift
 
 ## Overview
-Universal image batch converter with PyQt6 GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO/CUR files to JPEG, PNG, WebP, AVIF, or TIFF with full metadata preservation.
+Universal image batch converter with PyQt6 GUI. Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP, JPEG XL, Camera RAW, TIFF, BMP, JPEG 2000, QOI, and ICO/CUR files to JPEG, PNG, WebP, AVIF, TIFF, or JPEG XL with full metadata preservation.
 
 ## Tech Stack
 - **Language**: Python 3.10+
@@ -55,6 +55,7 @@ python heicshift.py --version
 - Auto-detect format: JPEG for photos, PNG for transparent images
 - **JPEG/PNG as input**: convert between any supported formats (JPEG->WebP, PNG->JPEG, etc.); same-format no-op auto-skipped unless resize/sRGB/strip-metadata is active
 - **AVIF output**: AVIF encoding via Pillow's native AV1 codec with quality slider
+- **JPEG XL output**: JPEG XL encoding via pillow-jxl-plugin with quality slider and effort=7 (conditional on plugin)
 - **CLI mode**: headless conversion via `--input` flag with full feature parity (all GUI options exposed as flags)
 - **In-place mode**: converts next to the original file and deletes source on success
 - **Atomic writes**: in-place mode uses temp file + `os.replace()` for crash-safe conversion
@@ -128,6 +129,7 @@ python heicshift.py --version
 - `_create_app_icon()` generates window/tray icon via QPainter
 
 ## Version
+- v2.7.0 — JPEG XL output format (pillow-jxl-plugin, conditional), CLI full parity (--tiff-compression, --png-level, --resize scale:VALUE), CLI progress counters + wall-clock time + files/sec, sorted scan results
 - v2.6.0 — AVIF output format (Pillow native AV1), CSV conversion report export, drag & drop individual files, CLI parity (--skip-existing, --progressive, --chroma-420, --lossless, --srgb, --prefix, --suffix, --no-structure), wall-clock time in done summary
 - v2.5.1 — JPEG/PNG input support (universal converter), same-format no-op skip guard
 - v2.5.0 — CLI mode (headless conversion), disk space pre-check, strip metadata option, auto-open output folder, file count in title bar, resize upscaling guard, better error logging (warnings), stats color reset, dependency version logging
@@ -152,3 +154,5 @@ python heicshift.py --version
 - Source/output overlap guard blocks exact same dir but warns (not blocks) for subdirs since `source/converted` is the default pattern
 - AVIF output requires Pillow 11+ (native AV1 support) — auto-installed by bootstrap
 - AVIF encoding quality defaults use same slider as JPEG/WebP (50-100), speed=6 (balanced)
+- JPEG XL output: quality maps to pillow-jxl-plugin `quality` param (1-100), effort=7 (good compression/speed tradeoff)
+- JPEG XL combo item disabled in GUI when pillow-jxl-plugin not installed; CLI exits with error code 2
