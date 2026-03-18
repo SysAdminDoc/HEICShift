@@ -6,6 +6,9 @@ Universal image batch converter with a modern GUI. Scans directories recursively
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 
+
+![Screenshot](screenshot.png)
+
 ## Why HEICShift?
 
 Most image converters get the details wrong — they strip metadata, mangle colors by dropping ICC profiles, or use lossy 4:2:0 chroma subsampling by default. HEICShift is built on research into what existing tools do poorly:
