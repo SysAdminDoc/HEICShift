@@ -466,16 +466,27 @@ class ScanResult:
 
 # ── Conversion Engine ─────────────────────────────────────────────────────────
 
-def scan_directory(root: Path, recursive: bool = True, extensions: set[str] | None = None) -> ScanResult:
+def scan_directory(root: Path, recursive: bool = True, extensions: set[str] | None = None, on_progress=None) -> ScanResult:
     """Find all supported image files in directory."""
     t0 = time.perf_counter()
     supported = extensions or get_supported_extensions()
     result = ScanResult()
     pattern = "**/*" if recursive else "*"
+    current_dir = None
+    dir_count = 0
     for p in root.glob(pattern):
         if p.is_file() and p.suffix.lower() in supported:
             result.files.append(p)
             result.total_size += p.stat().st_size
+            if p.parent != current_dir:
+                if on_progress and current_dir is not None:
+                    on_progress(len(result.files), result.total_size, str(current_dir), dir_count)
+                current_dir = p.parent
+                dir_count = 1
+            else:
+                dir_count += 1
+    if on_progress and current_dir is not None:
+        on_progress(len(result.files), result.total_size, str(current_dir), dir_count)
     result.files.sort()
     result.elapsed = time.perf_counter() - t0
     return result
@@ -872,6 +883,7 @@ class ConvertWorker(QThread):
 class ScanWorker(QThread):
     finished = pyqtSignal(object)  # ScanResult
     log = pyqtSignal(str)
+    scan_progress = pyqtSignal(int, int, str, int)  # total_count, total_bytes, dir_path, dir_file_count
 
     def __init__(self, directory, recursive, extensions=None):
         super().__init__()
@@ -881,7 +893,10 @@ class ScanWorker(QThread):
 
     def run(self):
         self.log.emit(f"Scanning {'recursively' if self.recursive else ''}: {self.directory}")
-        result = scan_directory(self.directory, self.recursive, self.extensions)
+        result = scan_directory(
+            self.directory, self.recursive, self.extensions,
+            on_progress=lambda count, size, d, dc: self.scan_progress.emit(count, size, d, dc),
+        )
         self.log.emit(
             f"Found {len(result.files)} supported files "
             f"({_fmt_size(result.total_size)}) in {result.elapsed:.2f}s"
@@ -1764,12 +1779,30 @@ class MainWindow(QMainWindow):
 
         self._scanner = ScanWorker(src, self.recursive_chk.isChecked(), enabled_exts)
         self._scanner.log.connect(self._log)
+        self._scanner.scan_progress.connect(self._on_scan_progress)
         self._scanner.finished.connect(self._on_scan_done)
+        self.progress_bar.setMaximum(0)
+        self.progress_bar.setFormat("Scanning...")
         self._scanner.start()
+
+    def _on_scan_progress(self, count: int, total_size: int, directory: str, dir_count: int):
+        try:
+            rel = str(Path(directory).relative_to(self.src_edit.text().strip()))
+            if rel == ".":
+                rel = Path(directory).name
+        except ValueError:
+            rel = directory
+        self.stat_files._val.setText(str(count))
+        self.stat_size._val.setText(_fmt_size(total_size))
+        self._log(f"  {rel}/ — {dir_count} file{'s' if dir_count != 1 else ''}")
+        self.status_bar.showMessage(f"Scanning... {count} files found ({_fmt_size(total_size)})")
 
     def _on_scan_done(self, result: ScanResult):
         self._scan_result = result
         self.scan_btn.setEnabled(True)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
 
         self.stat_files._val.setText(str(len(result.files)))
         self.stat_size._val.setText(_fmt_size(result.total_size))
