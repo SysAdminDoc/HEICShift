@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 HEICShift v2.8.0 - High-performance universal image batch converter
 Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP,
