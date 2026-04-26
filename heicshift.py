@@ -10,6 +10,25 @@ profiles, and XMP data. Supports CLI mode for headless/scripted operation.
 
 import sys, os, subprocess, importlib, platform, ctypes, argparse, shutil
 
+
+# codex-branding:start
+def _branding_icon_path() -> Path:
+    candidates = []
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "icon.png")
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "icon.png")
+    current = Path(__file__).resolve()
+    candidates.extend([current.parent / "icon.png", current.parent.parent / "icon.png", current.parent.parent.parent / "icon.png"])
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return Path("icon.png")
+# codex-branding:end
+
+
 APP_VERSION = "2.8.0"
 
 def _bootstrap():
@@ -97,7 +116,7 @@ except ImportError:
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSettings, QSize, QUrl,
 )
-from PyQt6.QtGui import (
+from PyQt6.QtGui import (, QIcon
     QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QAction,
     QDragEnterEvent, QDropEvent,
 )
@@ -2424,6 +2443,10 @@ def main():
         return
 
     app = QApplication(sys.argv)
+
+    branding_icon = QIcon(str(_branding_icon_path()))
+
+    app.setWindowIcon(branding_icon)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLESHEET)
 
@@ -2442,6 +2465,7 @@ def main():
 
     app.setWindowIcon(_create_app_icon())
     window = MainWindow()
+    window.setWindowIcon(branding_icon)
     window.show()
     sys.exit(app.exec())
 
