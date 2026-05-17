@@ -893,6 +893,61 @@ def _apply_canvas(img: "Image.Image", canvas_size: tuple[int, int],
     return base
 
 
+def _detect_hdr(img: "Image.Image", icc_profile: bytes | None = None) -> str | None:
+    """Best-effort HDR / wide-gamut detection. Returns 'pq', 'hlg', 'wide', or None.
+
+    Heuristic mix: PIL Image mode (I;16/F), bit depth, ICC profile colorspace
+    description, and image.info hints from pillow_heif.
+    """
+    if img.mode in ("I;16", "I;16B", "I;16L", "F"):
+        return "wide"
+    info = img.info or {}
+    color_space = info.get("color_space") or info.get("colorimetry") or ""
+    if isinstance(color_space, bytes):
+        color_space = color_space.decode("ascii", errors="replace")
+    if "pq" in color_space.lower() or "smpte2084" in color_space.lower():
+        return "pq"
+    if "hlg" in color_space.lower() or "arib-std-b67" in color_space.lower():
+        return "hlg"
+    if icc_profile:
+        try:
+            from PIL import ImageCms
+            prof = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
+            desc = (ImageCms.getProfileDescription(prof) or "").lower()
+            if any(tag in desc for tag in ("display p3", "rec.2020", "rec2020", "bt.2020")):
+                return "wide"
+        except Exception:
+            pass
+    return None
+
+
+def _tone_map_hdr(img: "Image.Image", curve: str) -> "Image.Image":
+    """Apply a tone-mapping curve to bring HDR/wide-gamut input down to sRGB.
+
+    curve : 'none' (no-op), 'reinhard', 'hable' (Uncharted 2), 'clip'.
+    Works on RGB float arrays via numpy; returns an 8-bit RGB image.
+    """
+    if curve == "none":
+        return img
+    arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+    if curve == "clip":
+        out = np.clip(arr, 0.0, 1.0)
+    elif curve == "reinhard":
+        out = arr / (1.0 + arr)
+        out = np.clip(out, 0.0, 1.0)
+    elif curve == "hable":
+        # Uncharted 2 filmic (John Hable, GDC 2010).
+        A, B, C, D, E, F = 0.15, 0.50, 0.10, 0.20, 0.02, 0.30
+        def fn(x):
+            return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F
+        W = 11.2
+        out = fn(arr) / fn(W)
+        out = np.clip(out, 0.0, 1.0)
+    else:
+        out = np.clip(arr, 0.0, 1.0)
+    return Image.fromarray((out * 255.0).round().astype(np.uint8), mode="RGB")
+
+
 def _psnr(a: "Image.Image", b: "Image.Image") -> float:
     """Compute PSNR between two images. Returns +inf when identical."""
     if a.size != b.size:
@@ -1135,6 +1190,7 @@ def convert_file(
     watermark: str | None = None,
     canvas: tuple[int, int] | None = None,
     canvas_bg: str = "transparent",
+    tone_map: str = "none",
 ) -> ConvertResult:
     """Convert a single image file. Thread-safe.
 
@@ -1164,6 +1220,17 @@ def convert_file(
             # Refresh EXIF from the transposed image (orientation tag removed)
             if "exif" in img.info:
                 meta["exif"] = img.info["exif"]
+
+        # HDR tone mapping — detect PQ/HLG/wide-gamut source and apply curve
+        # before subsequent sRGB / mode-flatten steps. Runs after EXIF-transpose
+        # so orientation is correct.
+        if tone_map and tone_map != "none":
+            hdr_kind = _detect_hdr(img, meta.get("icc_profile"))
+            if hdr_kind:
+                img = _tone_map_hdr(img, tone_map)
+                result.warnings.append(
+                    f"hdr: detected {hdr_kind}; tone-mapped with {tone_map} curve"
+                )
 
         # ICC profile override — embed a chosen profile (sRGB / Display P3 / Rec.2020)
         # regardless of source. Applied before --srgb so --srgb still wins if both
@@ -3448,6 +3515,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         "Polling-based; --watch-interval controls cadence. Ctrl-C to stop.")
     p.add_argument("--watch-interval", type=float, default=2.0, metavar="SEC",
                    help="Watch-mode poll interval in seconds (default 2.0)")
+    p.add_argument("--tone-map", type=str, default="none",
+                   choices=["none", "reinhard", "hable", "clip"],
+                   help="HDR tone-mapping curve when source is PQ/HLG/wide-gamut. "
+                        "'none' (default - preserve), 'reinhard' (gentle), "
+                        "'hable' (Uncharted 2 filmic), 'clip' (hard clamp).")
     return p
 
 
@@ -3995,6 +4067,7 @@ def _run_cli(args):
                 getattr(args, "watermark", None),             # watermark
                 _parse_canvas(getattr(args, "canvas", None)), # canvas
                 getattr(args, "canvas_bg", "transparent"),    # canvas_bg
+                getattr(args, "tone_map", "none"),             # tone_map
             )
             futures[fut] = f
 
