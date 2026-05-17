@@ -828,6 +828,8 @@ def convert_file(
     use_exiftool: bool = True,
     name_template: str | None = None,
     seq: int = 1,
+    only_if_smaller_pct: float | None = None,
+    dpi: tuple[int, int] | None = None,
 ) -> ConvertResult:
     """Convert a single image file. Thread-safe.
 
@@ -1043,6 +1045,20 @@ def convert_file(
         elif out_fmt == "JXL":
             save_kwargs["quality"] = jpeg_quality
             save_kwargs["effort"] = 7
+            # Lossless JPEG -> JXL transcoding. libjxl's signature feature:
+            # bit-exact transcode with ~20 % size reduction, fully reversible
+            # (Wikipedia JXL, HN 35212522). pillow_jxl defaults to lossless
+            # JPEG reconstruction for JPEG sources; --lossless makes it
+            # explicit and logs a warning so users see the win.
+            if src.suffix.lower() in JPEG_EXTS:
+                save_kwargs["lossless_jpeg"] = True
+                result.warnings.append(
+                    "jxl: lossless JPEG reconstruction (bit-exact, reversible)"
+                )
+
+        # Optional DPI tag — JPEG/TIFF/PNG support dpi; ignore for others.
+        if dpi and out_fmt in ("JPEG", "PNG", "TIFF"):
+            save_kwargs["dpi"] = dpi
 
         # Atomic write: use temp file for in-place mode
         if in_place:
@@ -1089,6 +1105,27 @@ def convert_file(
         result.dst = out_path
         result.size_after = out_path.stat().st_size
         result.success = True
+
+        # Conditional re-encode: drop the output if it's not meaningfully
+        # smaller than the source. Pattern from XnConvert / ImBatch.
+        if only_if_smaller_pct is not None and only_if_smaller_pct > 0:
+            threshold_ratio = (100.0 - only_if_smaller_pct) / 100.0
+            if result.size_before > 0 and (result.size_after / result.size_before) > threshold_ratio:
+                try:
+                    out_path.unlink()
+                except OSError:
+                    pass
+                result.dst = None
+                result.success = False
+                result.skipped = True
+                result.warnings.append(
+                    f"only-if-smaller: output {result.size_after}B was "
+                    f">{threshold_ratio*100:.0f}% of source {result.size_before}B; "
+                    f"discarded, keeping original"
+                )
+                # Don't run the rest of the post-save hooks if we discarded.
+                result.elapsed = time.perf_counter() - t0
+                return result
 
         # ── Sidecar companions ────────────────────────────────────────────
         # Live Photo .MOV — iPhone HEIC stills are paired with a sibling
@@ -2868,6 +2905,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Load preset from ~/.heicshift/presets/NAME.json before applying other flags")
     p.add_argument("--list-presets", action="store_true",
                    help="List available presets (built-ins + ~/.heicshift/presets/*.json) and exit")
+    p.add_argument("--only-if-smaller", type=float, default=None, metavar="PCT",
+                   help="Discard output and keep original when output is not at least PCT%% smaller "
+                        "than source (e.g. --only-if-smaller 20 means keep only when output \u2264 80%% of input)")
+    p.add_argument("--dpi", type=int, default=None, metavar="DPI",
+                   help="Set output DPI tag for JPEG / PNG / TIFF (e.g. --dpi 300 for print)")
     return p
 
 
@@ -3080,6 +3122,8 @@ def _run_cli(args):
                 not args.no_exiftool,           # use_exiftool
                 getattr(args, "template", None), # name_template
                 seq_i,                          # seq
+                getattr(args, "only_if_smaller", None),  # only_if_smaller_pct
+                (args.dpi, args.dpi) if getattr(args, "dpi", None) else None,  # dpi
             )
             futures[fut] = f
 
