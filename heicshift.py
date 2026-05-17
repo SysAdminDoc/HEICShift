@@ -3271,6 +3271,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         "or Linux .desktop file. macOS prints Automator recipe. Then exit.")
     p.add_argument("--unregister-shell", action="store_true",
                    help="Remove the shell integration installed by --register-shell")
+    p.add_argument("--use-cache", action="store_true",
+                   help="Use ~/.cache/heicshift/seen.sqlite to skip files whose (source-hash, "
+                        "preset-hash) was successfully converted before. Use when re-running "
+                        "the same batch.")
+    p.add_argument("--clear-cache", action="store_true",
+                   help="Delete ~/.cache/heicshift/seen.sqlite and exit")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume a previously interrupted batch from ~/.cache/heicshift/queue.json")
     return p
 
 
@@ -3328,6 +3336,83 @@ def _apply_preset_to_args(args, preset: dict):
             args.tiff_compression = ("none", "lzw", "deflate")[v] if 0 <= v < 3 else "none"
         elif k in _PRESET_ARG_KEYS and hasattr(args, k):
             setattr(args, k, v)
+
+
+HASH_CACHE_PATH = USER_CACHE_DIR / "seen.sqlite"
+
+
+def _open_hash_cache():
+    """Open (and lazily create) the conversion cache SQLite db. Returns None on failure."""
+    try:
+        import sqlite3
+        USER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(HASH_CACHE_PATH), timeout=2.0,
+                                isolation_level=None, check_same_thread=False)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS seen ("
+            " src_hash TEXT, preset_hash TEXT, dst_hash TEXT, dst_size INTEGER, "
+            " ts INTEGER, PRIMARY KEY (src_hash, preset_hash))"
+        )
+        return conn
+    except Exception:
+        return None
+
+
+def _file_sha256(path: Path) -> str:
+    """SHA-256 of file contents, streamed."""
+    import hashlib
+    h = hashlib.sha256()
+    with path.open("rb") as fp:
+        for chunk in iter(lambda: fp.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _preset_hash(*parts) -> str:
+    """Stable hash of the conversion preset (format, quality, resize, etc.)."""
+    import hashlib
+    payload = json.dumps([str(p) for p in parts], sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+QUEUE_STATE_PATH = USER_CACHE_DIR / "queue.json"
+
+
+def _save_queue_state(input_dir: Path, output_dir: Path, args, pending: list[Path],
+                       done: list[str], failed: list[str]):
+    """Persist the in-flight queue so a Ctrl-C / power-cycle can resume."""
+    try:
+        USER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        state = {
+            "ts": int(time.time()),
+            "version": APP_VERSION,
+            "input": str(input_dir),
+            "output": str(output_dir),
+            "format": getattr(args, "format", None),
+            "quality": getattr(args, "quality", None),
+            "pending": [str(p) for p in pending],
+            "done": done,
+            "failed": failed,
+        }
+        QUEUE_STATE_PATH.write_text(json.dumps(state, indent=2))
+    except Exception:
+        pass
+
+
+def _load_queue_state() -> dict | None:
+    if not QUEUE_STATE_PATH.is_file():
+        return None
+    try:
+        return json.loads(QUEUE_STATE_PATH.read_text())
+    except Exception:
+        return None
+
+
+def _clear_queue_state():
+    try:
+        QUEUE_STATE_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _install_shell_integration(uninstall: bool = False) -> int:
@@ -3539,6 +3624,19 @@ def _run_cli(args):
     )
     print(f"Found {len(scan.files)} files ({_fmt_size(scan.total_size)}) in {scan.elapsed:.2f}s")
 
+    # --resume: drop files that the previous run already converted.
+    if getattr(args, "resume", False):
+        state = _load_queue_state()
+        if state and state.get("input") == str(input_dir):
+            done_set = set(state.get("done", []))
+            pre = len(scan.files)
+            scan.files = [f for f in scan.files if str(f) not in done_set]
+            scan.total_size = sum(f.stat().st_size for f in scan.files)
+            print(f"[resume] {pre - len(scan.files)} files already done in previous run; "
+                  f"continuing with {len(scan.files)}")
+        else:
+            print("[resume] no previous queue found (or different input dir); ignoring --resume")
+
     if not scan.files:
         print("No supported files found.")
         sys.exit(EXIT_OK)
@@ -3584,6 +3682,40 @@ def _run_cli(args):
     t0 = time.perf_counter()
 
     all_results: list[ConvertResult] = []
+    cache_conn = _open_hash_cache() if getattr(args, "use_cache", False) else None
+    cache_preset_key = _preset_hash(
+        args.format, args.quality, args.in_place, args.no_structure,
+        getattr(args, "template", None), resize_mode, resize_value,
+        args.prefix, args.suffix, args.lossless, args.progressive,
+        args.chroma_420, args.srgb, args.tiff_compression, args.png_level,
+        getattr(args, "icc", None), getattr(args, "watermark", None),
+        getattr(args, "canvas", None), getattr(args, "canvas_bg", "transparent"),
+        getattr(args, "dpi", None), getattr(args, "recompress", False),
+        getattr(args, "target_kb", None), getattr(args, "target_psnr", None),
+    ) if cache_conn else None
+    cache_skipped: list[Path] = []
+    if cache_conn:
+        pruned = []
+        for f in scan.files:
+            try:
+                src_h = _file_sha256(f)
+                row = cache_conn.execute(
+                    "SELECT dst_size FROM seen WHERE src_hash=? AND preset_hash=?",
+                    (src_h, cache_preset_key),
+                ).fetchone()
+                if row:
+                    cache_skipped.append(f)
+                    continue
+            except Exception:
+                pass
+            pruned.append(f)
+        if cache_skipped:
+            print(f"[cache] skipping {len(cache_skipped)} files seen with this preset")
+        scan.files = pruned
+        total = len(scan.files)
+    done_paths: list[str] = []
+    failed_paths: list[str] = []
+
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {}
         for seq_i, f in enumerate(scan.files, start=1):
@@ -3627,10 +3759,48 @@ def _run_cli(args):
                 )
             else:
                 fail_count += 1
+                failed_paths.append(str(result.src))
                 print(f"[FAIL] ({done_count}/{total}) {result.src.name}: {result.error}")
+
+            if result.success and not result.skipped:
+                done_paths.append(str(result.src))
+                # Persist into hash cache for future --use-cache runs.
+                if cache_conn:
+                    try:
+                        cache_conn.execute(
+                            "INSERT OR REPLACE INTO seen "
+                            "(src_hash, preset_hash, dst_hash, dst_size, ts) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (_file_sha256(result.src), cache_preset_key,
+                             _file_sha256(result.dst) if result.dst else "",
+                             result.size_after, int(time.time())),
+                        )
+                    except Exception:
+                        pass
+
+            # Persist queue state every 5 completions so a power cycle
+            # doesn't lose more than a handful of converts.
+            if done_count % 5 == 0:
+                _save_queue_state(input_dir, output_dir, args,
+                                   pending=[fp for fp in scan.files
+                                            if str(fp) not in done_paths
+                                            and str(fp) not in failed_paths],
+                                   done=done_paths, failed=failed_paths)
 
             for warn in result.warnings:
                 print(f"[WARN] {result.src.name}: {warn}")
+
+    if cache_conn:
+        try:
+            cache_conn.close()
+        except Exception:
+            pass
+    # Successful end-of-batch -> drop queue state so future --resume is a no-op.
+    if fail_count == 0:
+        _clear_queue_state()
+    else:
+        _save_queue_state(input_dir, output_dir, args, pending=[],
+                           done=done_paths, failed=failed_paths)
 
     wall_time = time.perf_counter() - t0
     speed = ok_count / wall_time if wall_time > 0 else 0
@@ -3706,6 +3876,15 @@ def main():
         sys.exit(_install_shell_integration(uninstall=False))
     if getattr(args, "unregister_shell", False):
         sys.exit(_install_shell_integration(uninstall=True))
+
+    if getattr(args, "clear_cache", False):
+        try:
+            HASH_CACHE_PATH.unlink(missing_ok=True)
+            print(f"[cache] removed {HASH_CACHE_PATH}")
+        except OSError as e:
+            print(f"[cache] failed: {e}", file=sys.stderr)
+            sys.exit(EXIT_INPUT_ERROR)
+        sys.exit(EXIT_OK)
 
     _seed_user_preset_dir()
     _warn_below_floor()
