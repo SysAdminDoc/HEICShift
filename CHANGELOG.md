@@ -2,6 +2,58 @@
 
 All notable changes to HEICShift will be documented in this file.
 
+## [v3.0.0] — 2026-05-17
+
+Major release. Bundles 14 Next-tier features and 6 Later-tier architectural items
+the entire roadmap "Now" tier already shipped in v2.9.0.
+
+### Pipeline (new flags)
+
+- `--watch` + `--watch-interval SEC` — folder watch mode, polling-based, debounced
+- `--frames {first,all,animate}` — multi-frame source handling (animated WebP / AVIF / GIF / APNG / multi-page TIFF / HEIC sequences)
+- `--recompress` — pixel-lossless JPEG → JPEG via `jpegoptim` / `jpegtran` fast-path
+- `--target-kb N` — binary-search quality to hit a target output size
+- `--target-psnr DB` — binary-search quality to hit a minimum PSNR vs source
+- `--only-if-smaller PCT` — discard re-encoded output when not meaningfully smaller
+- `--tone-map {none,reinhard,hable,clip}` — HDR tone mapping for PQ / HLG / wide-gamut sources
+- `--icc PROFILE` — embed a chosen ICC profile (`sRGB` built-in or path to `.icc`)
+- `--xmp-sidecar` — emit `<output>.xmp` next to converted file (darktable convention)
+- `--dpi N` — set output DPI tag for JPEG / PNG / TIFF
+- `--watermark SPEC` — text or PNG overlay with 9 positions + opacity
+- `--canvas WxH` + `--canvas-bg COLOR` — pad to fixed canvas with background fill
+- `--use-cache` + `--clear-cache` — content-hash cache at `~/.cache/heicshift/seen.sqlite`
+- `--resume` — pick up where a Ctrl-C / power-cycle left off (queue state at `~/.cache/heicshift/queue.json`)
+- `--use-processes` — `ProcessPoolExecutor` for GIL-bound interpreters
+- `--backend {pillow,vips}` — opt-in libvips streaming backend for huge images
+- `--verify-quality` — post-conversion butteraugli / ffmpeg-quality-metrics check
+- `--sidecar-history` — write `<output>.heicshift.json` with full preset for reproducibility
+- `--register-shell` / `--unregister-shell` — Windows Explorer menu / Linux `.desktop` integration
+
+### Format wins
+
+- **Lossless JPEG → JXL transcoding** — pillow_jxl's bit-exact reconstruction, ~20% size reduction
+- **Wide-gamut / 10-bit HEIC → AVIF / JXL preservation** — detects source `bit_depth` and passes through
+
+### Extensibility
+
+- **Plugin system** — `~/.heicshift/plugins/*.py` auto-loaded at startup; PLUGINS.md documents Decoder / Encoder / Storage shapes
+- **conda-forge recipe** at `packaging/conda-forge/meta.yaml`
+- **Multi-platform installer stubs** at `packaging/installers/` (MSI / DMG / .deb / .rpm / AppImage)
+
+### Diagnostics
+
+- Free-threaded Python detection (`sys._is_gil_enabled`) surfaced in CLI dep banner
+- ffprobe cross-decoder validation when on PATH (second opinion on the saved file)
+
+### Deferred (see ROADMAP.md "Deferred" section for the why)
+
+macOS native ImageIO path, GPU codec hooks, multi-encoder AVIF shootout,
+HTJ2K via OpenJPH, Apple ProRAW tone-map, SVG/PDF/PSD/XCF/EXR input,
+Pyodide WASM build. Each needs external infrastructure (signing cert,
+GPU, macOS host, encoder binary) that a code-only pass can't conjure;
+they remain `[ ]` on the roadmap until a contributor with the right
+setup picks them up.
+
 ## [v2.9.0] — 2026-05-17
 
 The roadmap's "Now" tier — 24 items shipped against a 2026-05-17 plan.

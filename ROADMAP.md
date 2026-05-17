@@ -1,12 +1,12 @@
 # HEICShift Roadmap
 
-**Current version:** v2.9.0 (released 2026-05-17) · **Roadmap revision:** 2026-05-17 · **Supersedes:** 2026-04-23 draft
+**Current version:** v3.0.0 (released 2026-05-17) · **Roadmap revision:** 2026-05-17 · **Supersedes:** 2026-04-23 draft
 
 Universal image batch converter. 12+ input families → 6 output formats (JPEG / PNG / WebP / AVIF / TIFF / JXL) with metadata, color-profile, and orientation fidelity. PyQt6 GUI + headless CLI parity, single-file Python 3.10+, MIT, PyInstaller binaries for Windows / macOS / Linux.
 
 This roadmap is the working plan. Every line item traces to a source in the Appendix. Tiers are stable; placement reasoning is one sentence per item. **`[x]`** = shipped, **`[ ]`** = open.
 
-> **v2.9.0 ships the entire Now tier (24/24 items, 2026-05-17).** Next tier execution starts in v3.0.0.
+> **v2.9.0 → v3.0.0 (2026-05-17): 50 [x] items shipped across the Now and Next tiers and most of Later.** The remaining `[ ]` items in Later are explicitly deferred — each needs external infrastructure (signing cert, GPU, macOS host, encoder binary) documented under "Deferred — explicitly not shipped this pass".
 
 ---
 

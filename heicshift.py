@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HEICShift v2.9.0 - Universal image batch converter
+HEICShift v3.0.0 - Universal image batch converter
 Scans directories recursively and converts JPEG, PNG, HEIC, AVIF, WebP,
 JPEG XL, RAW, TIFF, BMP, JPEG 2000, QOI, and ICO files to JPEG, PNG,
 WebP, AVIF, TIFF, or JPEG XL. Auto-detects optimal format: PNG for
@@ -30,7 +30,7 @@ def _branding_icon_path() -> Path:
 # codex-branding:end
 
 
-APP_VERSION = "2.9.0"
+APP_VERSION = "3.0.0"
 
 # Structured exit-code matrix — documented in README + man-page-style.
 # CI / cron / Ansible scripts can branch on these without parsing log output.
