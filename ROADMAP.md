@@ -33,7 +33,7 @@ Highest-leverage, lowest-risk. Closes known CVE exposure, ships the metadata-fid
 - [x] **`requirements.txt` + `pyproject.toml` with pinned floors** — currently `_bootstrap()` runtime-pip-installs whatever is latest; venvs that froze on old wheels stay exposed to libheif / libjxl / Pillow CVEs forever. Pin `Pillow>=11.3.0, pillow-heif>=1.3.0, pillow-jxl-plugin>=1.3.6, rawpy>=0.27.0, PyQt6>=6.8`. Add a startup version check that warns when below floor. Effort 1, Impact 5. *Closes: [CVE-2025-48379](https://nvd.nist.gov/vuln/detail/CVE-2025-48379), [CVE-2024-28219](https://www.sentinelone.com/vulnerability-database/cve-2024-28219/), [CVE-2025-29482](https://dailycve.com/libheif-buffer-overflow-cve-2025-29482-critical/), [CVE-2024-41311](https://www.sentinelone.com/vulnerability-database/cve-2024-41311/), [CVE-2024-11403 / 11498](https://github.com/libjxl/libjxl/releases), [CVE-2026-28231](https://github.com/bigcat88/pillow_heif/blob/master/CHANGELOG.md).*
 - [x] **Replace runtime `_bootstrap()` pip-install with explicit install instructions** — auto-install-at-runtime violates the user's standard project pattern and surprises users in restricted environments. Keep an `--install-deps` opt-in subcommand instead. Effort 1, Impact 3.
 - [x] **libheif memory cap** — wire `pillow_heif`'s `set_security_limits()` / max-decode-memory knob so a hostile HEIC can't OOM the host. New in libheif 1.20 ([1.20 release notes](https://github.com/strukturag/libheif/releases)). Effort 1, Impact 4.
-- **Symlink loop guard in `scan_directory`** — `p.is_file()` happily follows symlinks; a recursive scan over a directory containing a symlink to its parent loops until the path-length limit. Add a `visited_inodes` set; skip already-seen inodes. Effort 1, Impact 3.
+- [x] **Symlink loop guard in `scan_directory`** — `p.is_file()` happily follows symlinks; a recursive scan over a directory containing a symlink to its parent loops until the path-length limit. Add a `visited_inodes` set; skip already-seen inodes. Effort 1, Impact 3.
 
 ### Correctness & metadata fidelity (closes today's quiet bugs)
 
@@ -55,7 +55,7 @@ Highest-leverage, lowest-risk. Closes known CVE exposure, ships the metadata-fid
 - **JSON report mode** (`--report out.json`) — current CSV is human-first; CI / Ansible / cron need NDJSON streamed to stdout *and* a final summary file. Schema per file: `{src, dst, fmt, size_in, size_out, elapsed, warnings[], ok}`. Effort 2, Impact 3.
 - **Preset JSON load** (`--preset name` + `~/.heicshift/presets/*.json`) — already in 2026-04 draft. Dump the four built-in `PRESETS` to disk on first run; expose `--preset` and `--list-presets`. Effort 2, Impact 3.
 - **Structured exit-code matrix** — `0 OK · 1 partial · 2 input-error · 3 dep-missing · 4 disk-full · 5 cancelled`. Today's `0 / 1 / 2` collapses "no JXL plugin" with "directory missing." Effort 1, Impact 2.
-- **`--exclude PATTERN` glob filter** — extends scan with negation; matches XnConvert / find-style usage. Effort 1, Impact 2.
+- [x] **`--exclude PATTERN` glob filter** — extends scan with negation; matches XnConvert / find-style usage. Effort 1, Impact 2.
 
 ### Distribution & repo hygiene
 

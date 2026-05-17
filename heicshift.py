@@ -555,18 +555,72 @@ class ScanResult:
 
 # ── Conversion Engine ─────────────────────────────────────────────────────────
 
-def scan_directory(root: Path, recursive: bool = True, extensions: set[str] | None = None, on_progress=None) -> ScanResult:
-    """Find all supported image files in directory."""
+def scan_directory(
+    root: Path,
+    recursive: bool = True,
+    extensions: set[str] | None = None,
+    on_progress=None,
+    exclude_patterns: list[str] | None = None,
+) -> ScanResult:
+    """Find all supported image files in directory.
+
+    Resilient to symlink loops via realpath-based visited-set bookkeeping.
+    Optional ``exclude_patterns`` is a list of glob-style patterns (e.g.
+    ``["*.thumb.*", "**/cache/**"]``) tested against the *relative* path.
+    """
     t0 = time.perf_counter()
     supported = extensions or get_supported_extensions()
     result = ScanResult()
-    pattern = "**/*" if recursive else "*"
     current_dir = None
     dir_count = 0
-    for p in root.glob(pattern):
-        if p.is_file() and p.suffix.lower() in supported:
+    visited_dirs: set[str] = set()
+    exclude_patterns = exclude_patterns or []
+
+    def _excluded(rel: Path) -> bool:
+        s = rel.as_posix()
+        for pat in exclude_patterns:
+            if rel.match(pat) or Path(s).match(pat):
+                return True
+        return False
+
+    def _walk(d: Path):
+        # Resolve to catch loops via symlink-to-ancestor; skip on permission errors.
+        try:
+            real = str(d.resolve(strict=False))
+        except OSError:
+            return
+        if real in visited_dirs:
+            return
+        visited_dirs.add(real)
+        try:
+            entries = list(d.iterdir())
+        except (PermissionError, OSError):
+            return
+        for p in entries:
+            try:
+                if p.is_dir():
+                    if recursive:
+                        _walk(p)
+                    continue
+                if not p.is_file():
+                    continue
+            except OSError:
+                continue
+            if p.suffix.lower() not in supported:
+                continue
+            try:
+                rel = p.relative_to(root)
+            except ValueError:
+                rel = p
+            if _excluded(rel):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
             result.files.append(p)
-            result.total_size += p.stat().st_size
+            result.total_size += st.st_size
+            nonlocal current_dir, dir_count
             if p.parent != current_dir:
                 if on_progress and current_dir is not None:
                     on_progress(len(result.files), result.total_size, str(current_dir), dir_count)
@@ -574,6 +628,8 @@ def scan_directory(root: Path, recursive: bool = True, extensions: set[str] | No
                 dir_count = 1
             else:
                 dir_count += 1
+
+    _walk(root)
     if on_progress and current_dir is not None:
         on_progress(len(result.files), result.total_size, str(current_dir), dir_count)
     result.files.sort()
@@ -2323,6 +2379,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="PNG compression level 1-9 (default: 6)")
     p.add_argument("--no-structure", action="store_true",
                    help="Flatten output (no subdirectory mirroring)")
+    p.add_argument("--exclude", action="append", default=[], metavar="PATTERN",
+                   help="Glob pattern to exclude (repeatable). Example: --exclude '*.thumb.*' --exclude 'cache/**'")
     return p
 
 
@@ -2410,7 +2468,11 @@ def _run_cli(args):
 
     # Scan
     print(f"\nScanning{'  recursively' if args.recursive else ''}...")
-    scan = scan_directory(input_dir, args.recursive)
+    scan = scan_directory(
+        input_dir,
+        recursive=args.recursive,
+        exclude_patterns=getattr(args, "exclude", None) or [],
+    )
     print(f"Found {len(scan.files)} files ({_fmt_size(scan.total_size)}) in {scan.elapsed:.2f}s")
 
     if not scan.files:
