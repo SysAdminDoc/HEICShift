@@ -997,6 +997,80 @@ def convert_file(
         result.size_after = out_path.stat().st_size
         result.success = True
 
+        # ── Sidecar companions ────────────────────────────────────────────
+        # Live Photo .MOV — iPhone HEIC stills are paired with a sibling
+        # .MOV motion file. Carry it through alongside the converted still
+        # so users keep the dynamic version.
+        if not in_place:
+            mov_candidates = [
+                src.with_suffix(".mov"), src.with_suffix(".MOV"),
+                src.with_suffix(".heic.mov"),
+            ]
+            for mov in mov_candidates:
+                if mov.exists():
+                    dst_mov = out_path.with_suffix(mov.suffix)
+                    try:
+                        shutil.copy2(mov, dst_mov)
+                        result.warnings.append(f"live-photo: copied {mov.name} -> {dst_mov.name}")
+                    except OSError as e:
+                        result.warnings.append(f"live-photo: copy failed ({e})")
+                    break
+
+        # Depth map / aux images — pillow_heif >= 0.20 exposes depth_images
+        # via info; emit each as a 16-bit PNG sidecar next to the output.
+        if src.suffix.lower() in HEIC_EXTS:
+            depth_list = None
+            try:
+                # Re-open via pillow_heif's typed API to get the depth payload.
+                heif_file = pillow_heif.read_heif(str(src))
+                depth_list = getattr(heif_file, "depth_images", None)
+            except Exception:
+                depth_list = None
+            if depth_list:
+                for i, depth in enumerate(depth_list):
+                    suffix = ".depth.png" if i == 0 else f".depth{i}.png"
+                    depth_path = out_path.with_suffix(suffix)
+                    try:
+                        depth_img = Image.frombytes(
+                            depth.mode, depth.size, bytes(depth.data),
+                            "raw", depth.mode, depth.stride,
+                        )
+                        depth_img.save(depth_path, "PNG", optimize=True)
+                        result.warnings.append(
+                            f"depth: saved {depth_path.name} ({depth.size[0]}x{depth.size[1]})"
+                        )
+                    except Exception as e:
+                        result.warnings.append(f"depth: extract failed ({e})")
+
+        # HDR gain-map detection (ISO 21496-1) — libheif lacks native support
+        # so we can't TRANSCODE the gain map yet, but ExifTool can tell us
+        # whether a Display P3 / Adaptive HDR map is present, and we copy
+        # the source HEIC alongside as an archival fallback.
+        if (HAS_EXIFTOOL and src.suffix.lower() in HEIC_EXTS and not in_place):
+            try:
+                probe = subprocess.run(
+                    [EXIFTOOL_PATH, "-j", "-GainMapHeadroom", "-HDRGainMap",
+                     "-HDRImage", "-HasHDR", str(src)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if probe.returncode == 0 and probe.stdout:
+                    import json as _json
+                    meta_probe = _json.loads(probe.stdout)
+                    if meta_probe and any(
+                        meta_probe[0].get(k) for k in
+                        ("GainMapHeadroom", "HDRGainMap", "HasHDR", "HDRImage")
+                    ):
+                        gainmap_sidecar = out_path.with_suffix(".gainmap.heic")
+                        if not gainmap_sidecar.exists():
+                            shutil.copy2(src, gainmap_sidecar)
+                        result.warnings.append(
+                            f"hdr-gainmap: ISO 21496-1 detected; archived "
+                            f"original as {gainmap_sidecar.name} (libheif "
+                            f"cannot yet transcode gain maps)"
+                        )
+            except Exception:
+                pass
+
         # In-place mode: delete the original after successful conversion
         if in_place and result.success:
             src.unlink()
