@@ -32,6 +32,16 @@ def _branding_icon_path() -> Path:
 
 APP_VERSION = "2.9.0"
 
+# Structured exit-code matrix — documented in README + man-page-style.
+# CI / cron / Ansible scripts can branch on these without parsing log output.
+EXIT_OK              = 0   # all files converted
+EXIT_PARTIAL_FAILURE = 1   # some files failed, some succeeded
+EXIT_INPUT_ERROR     = 2   # bad CLI args / missing input directory / unwritable output
+EXIT_DEP_MISSING     = 3   # required Python module or optional codec missing
+EXIT_DISK_FULL       = 4   # output medium ran out of space mid-run
+EXIT_CANCELLED       = 5   # user pressed Ctrl-C / Cancel button
+EXIT_TOTAL_FAILURE   = 6   # every file in batch failed
+
 # Dependency floors — see requirements.txt / ROADMAP Appendix A6 for CVE rationale.
 # Older versions of these expose users to known libheif / libjxl / Pillow RCEs.
 DEP_FLOORS = {
@@ -876,13 +886,19 @@ def convert_file(
         else:
             img.save(str(out_path), out_fmt, **save_kwargs)
 
-        # Validate output file integrity
+        # Validate output file integrity. Image.verify() only checks the header;
+        # pair it with a re-open + size-match so a truncated encode is detected.
         check_path = temp_path if in_place else out_path
         if not check_path.exists() or check_path.stat().st_size == 0:
             raise RuntimeError(f"Output file missing or empty: {check_path.name}")
         try:
             with Image.open(str(check_path)) as verify_img:
                 verify_img.verify()
+            with Image.open(str(check_path)) as decoded:
+                if decoded.size != img.size:
+                    raise RuntimeError(
+                        f"Output size {decoded.size} != source size {img.size}"
+                    )
         except Exception as ve:
             raise RuntimeError(f"Output validation failed: {ve}")
 
@@ -2406,8 +2422,8 @@ def _run_cli(args):
 
     input_dir = Path(args.input).resolve()
     if not input_dir.is_dir():
-        print(f"[ERROR] Not a directory: {input_dir}")
-        sys.exit(2)
+        print(f"[ERROR] Not a directory: {input_dir}", file=sys.stderr)
+        sys.exit(EXIT_INPUT_ERROR)
 
     if args.in_place:
         output_dir = input_dir
@@ -2439,13 +2455,15 @@ def _run_cli(args):
 
     # Validate JXL dependency
     if args.format == "jxl" and not HAS_JXL:
-        print("[ERROR] JPEG XL output requires pillow-jxl-plugin (pip install pillow-jxl-plugin)")
-        sys.exit(2)
+        print("[ERROR] JPEG XL output requires pillow-jxl-plugin (pip install pillow-jxl-plugin)",
+              file=sys.stderr)
+        sys.exit(EXIT_DEP_MISSING)
 
     # Validate PNG compression level
     if args.png_level < 1 or args.png_level > 9:
-        print(f"[ERROR] PNG compression level must be 1-9, got {args.png_level}")
-        sys.exit(2)
+        print(f"[ERROR] PNG compression level must be 1-9, got {args.png_level}",
+              file=sys.stderr)
+        sys.exit(EXIT_INPUT_ERROR)
 
     # Parse resize
     resize_mode = "none"
@@ -2460,11 +2478,12 @@ def _run_cli(args):
                 resize_mode = "scale"
                 resize_value = int(parts[1])
             else:
-                print(f"[ERROR] Invalid resize format: {args.resize} (use max_dim:VALUE or scale:VALUE)")
-                sys.exit(2)
+                print(f"[ERROR] Invalid resize format: {args.resize} (use max_dim:VALUE or scale:VALUE)",
+                      file=sys.stderr)
+                sys.exit(EXIT_INPUT_ERROR)
         except ValueError:
-            print(f"[ERROR] Invalid resize value: {args.resize}")
-            sys.exit(2)
+            print(f"[ERROR] Invalid resize value: {args.resize}", file=sys.stderr)
+            sys.exit(EXIT_INPUT_ERROR)
 
     # Scan
     print(f"\nScanning{'  recursively' if args.recursive else ''}...")
@@ -2477,14 +2496,14 @@ def _run_cli(args):
 
     if not scan.files:
         print("No supported files found.")
-        sys.exit(0)
+        sys.exit(EXIT_OK)
 
     # Dry run — list and exit
     if args.dry_run:
         print(f"\n[DRY RUN] Would convert {len(scan.files)} files:")
         for f in sorted(scan.files):
             print(f"  {f}")
-        sys.exit(0)
+        sys.exit(EXIT_OK)
 
     # Disk space check
     if not args.in_place:
@@ -2495,9 +2514,10 @@ def _run_cli(args):
         if estimated > disk.free:
             print(
                 f"[ERROR] Not enough disk space. Estimated output: {_fmt_size(estimated)}, "
-                f"available: {_fmt_size(disk.free)}"
+                f"available: {_fmt_size(disk.free)}",
+                file=sys.stderr,
             )
-            sys.exit(2)
+            sys.exit(EXIT_DISK_FULL)
         if estimated > disk.free * 0.8:
             print(
                 f"[WARN] Estimated output ({_fmt_size(estimated)}) exceeds 80% of "
@@ -2557,11 +2577,12 @@ def _run_cli(args):
     speed = ok_count / wall_time if wall_time > 0 else 0
     print(f"\nDone: {ok_count} converted, {fail_count} failed, {skip_count} skipped in {wall_time:.0f}s ({speed:.1f} files/sec)")
 
-    if fail_count == total:
-        sys.exit(2)
+    # Structured exit-code matrix — see EXIT_CODES at module top.
+    if fail_count == total and total > 0:
+        sys.exit(EXIT_TOTAL_FAILURE)
     elif fail_count > 0:
-        sys.exit(1)
-    sys.exit(0)
+        sys.exit(EXIT_PARTIAL_FAILURE)
+    sys.exit(EXIT_OK)
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────

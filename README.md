@@ -195,7 +195,17 @@ python heicshift.py --version
 | `--no-structure` | Flatten output (no subdirectory mirroring) |
 | `--version` | Print version and exit |
 
-**Exit codes:** 0 = all OK, 1 = partial failure, 2 = total failure or bad input.
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | All files converted |
+| 1 | Partial failure (some converted, some failed) |
+| 2 | Input error (bad path, malformed flag value) |
+| 3 | Required dependency missing (e.g. `--format jxl` without `pillow-jxl-plugin`) |
+| 4 | Disk full / not enough space for estimated output |
+| 5 | User cancelled (Ctrl-C / Cancel button) |
+| 6 | Every file in the batch failed |
 
 ## How It Works
 
