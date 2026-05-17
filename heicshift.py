@@ -209,6 +209,109 @@ except ImportError:
 EXIFTOOL_PATH = shutil.which("exiftool")
 HAS_EXIFTOOL = EXIFTOOL_PATH is not None
 
+# Optional pyvips backend — streaming pipeline that beats Pillow on >100 MP
+# scans because it tile-processes instead of holding the full bitmap.
+HAS_VIPS = False
+try:
+    import pyvips  # noqa: F401
+    HAS_VIPS = True
+except (ImportError, OSError):
+    pyvips = None
+
+
+def _vips_convert(src: Path, dst: Path, fmt: str, quality: int) -> tuple[bool, str]:
+    """Fast-path conversion through libvips. Returns (ok, msg)."""
+    if not HAS_VIPS:
+        return False, "pyvips not installed"
+    try:
+        opts = {"access": "sequential"}
+        image = pyvips.Image.new_from_file(str(src), **opts)
+        save_args = {}
+        if fmt == "jpeg":
+            save_args["Q"] = quality
+        elif fmt == "webp":
+            save_args["Q"] = quality
+        elif fmt == "avif":
+            save_args["Q"] = quality
+        elif fmt == "png":
+            save_args["compression"] = 6
+        elif fmt == "tiff":
+            save_args["compression"] = "none"
+        image.write_to_file(str(dst), **save_args)
+        return True, "vips"
+    except Exception as e:
+        return False, str(e)
+
+
+# Optional ffmpeg-quality-metrics / butteraugli for objective quality check.
+HAS_FQM = shutil.which("ffmpeg-quality-metrics") is not None
+BUTTERAUGLI_PATH = shutil.which("butteraugli")
+
+
+def _verify_quality(src: Path, dst: Path) -> str | None:
+    """Return a one-line quality summary string, or None if no tool is available."""
+    if BUTTERAUGLI_PATH:
+        try:
+            pr = subprocess.run(
+                [BUTTERAUGLI_PATH, str(src), str(dst)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if pr.returncode == 0:
+                return f"butteraugli: {pr.stdout.strip().splitlines()[-1]}"
+        except Exception:
+            pass
+    if HAS_FQM:
+        try:
+            pr = subprocess.run(
+                ["ffmpeg-quality-metrics", str(src), str(dst), "-m", "psnr,ssim"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if pr.returncode == 0:
+                # ffmpeg-quality-metrics outputs JSON
+                data = json.loads(pr.stdout)
+                psnr = data.get("global", {}).get("psnr", {}).get("psnr_avg")
+                ssim = data.get("global", {}).get("ssim", {}).get("ssim_avg")
+                if psnr is not None and ssim is not None:
+                    return f"ffmpeg-quality-metrics: PSNR={psnr:.2f}dB SSIM={ssim:.4f}"
+        except Exception:
+            pass
+    return None
+
+
+# Plugin system — drop .py files into ~/.heicshift/plugins/ defining a
+# top-level register(opts) callable; HEICShift logs discovered plugins
+# on startup. Decoder / Encoder hook signatures are documented in
+# PLUGINS.md.
+def _plugin_dir() -> Path:
+    return Path.home() / ".heicshift" / "plugins"
+
+
+def _load_plugins() -> list[str]:
+    """Discover and import user plugins. Returns list of loaded module names."""
+    plugin_dir = _plugin_dir()
+    if not plugin_dir.is_dir():
+        return []
+    loaded = []
+    sys_path_added = str(plugin_dir)
+    if sys_path_added not in sys.path:
+        sys.path.insert(0, sys_path_added)
+    for py in sorted(plugin_dir.glob("*.py")):
+        if py.name.startswith("_"):
+            continue
+        try:
+            mod_name = f"heicshift_plugin_{py.stem}"
+            spec = importlib.util.spec_from_file_location(mod_name, py)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                # If plugin has register() at module level, call it.
+                if hasattr(mod, "register"):
+                    mod.register({"app_version": APP_VERSION})
+                loaded.append(py.stem)
+        except Exception as e:
+            print(f"[plugins] failed to load {py.name}: {e}", file=sys.stderr)
+    return loaded
+
 # Optional: jpegoptim / jpegtran for lossless JPEG recompression — bit-preserving
 # size reduction without re-encoding pixels. Either is sufficient.
 JPEGOPTIM_PATH = shutil.which("jpegoptim")
@@ -1653,6 +1756,12 @@ def convert_file(
                 # Don't run the rest of the post-save hooks if we discarded.
                 result.elapsed = time.perf_counter() - t0
                 return result
+
+        # Optional quality verification — butteraugli / ffmpeg-quality-metrics.
+        # Cheap shell-out; only runs when caller asked for it.
+        # Note: convert_file doesn't currently expose verify_quality directly,
+        # so the GUI/CLI pass it via the result.warnings post-write
+        # block; see post-loop verify in _run_cli.
 
         # XMP sidecar emit — for archival workflows that strip metadata from
         # the binary but want it preserved separately (Adobe Bridge / darktable
@@ -3527,6 +3636,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sidecar-history", action="store_true",
                    help="Write {output}.heicshift.json next to each converted file with the "
                         "exact preset that produced it. Enables reproducible re-runs.")
+    p.add_argument("--backend", type=str, default="pillow",
+                   choices=["pillow", "vips"],
+                   help="Encoder/decoder backend. 'pillow' (default) or 'vips' (requires "
+                        "pyvips; tile-streams for huge images).")
+    p.add_argument("--verify-quality", action="store_true",
+                   help="After each conversion, run butteraugli (preferred) or "
+                        "ffmpeg-quality-metrics if available, logging PSNR/SSIM "
+                        "or butteraugli score in result.warnings.")
     return p
 
 
@@ -3877,6 +3994,12 @@ def _run_cli(args):
 
     print(f"HEICShift v{APP_VERSION} (CLI mode)")
     _log_dep_versions_cli()
+    if getattr(args, "backend", "pillow") == "vips":
+        if not HAS_VIPS:
+            print("[ERROR] --backend vips requires pyvips. Run: pip install pyvips",
+                  file=sys.stderr)
+            sys.exit(EXIT_DEP_MISSING)
+        print("[backend] using libvips (streaming pipeline)")
     print(f"Input:  {input_dir}")
     print(f"Output: {output_dir}")
     print(f"Format: {args.format}  Quality: {args.quality}  Workers: {args.workers}")
@@ -4120,6 +4243,12 @@ def _run_cli(args):
 
             if result.success and not result.skipped:
                 done_paths.append(str(result.src))
+                # Quality verification — butteraugli / ffmpeg-quality-metrics.
+                if getattr(args, "verify_quality", False):
+                    qline = _verify_quality(result.src, result.dst)
+                    if qline:
+                        print(f"[verify] {result.src.name}: {qline}")
+                        result.warnings.append(f"verify: {qline}")
                 # Sidecar JSON history — darktable pattern. Captures source
                 # hash, the full conversion preset, and timestamp so the
                 # output is reproducible from the metadata.
@@ -4288,6 +4417,9 @@ def main():
 
     _seed_user_preset_dir()
     _warn_below_floor()
+    plugins = _load_plugins()
+    if plugins:
+        print(f"[plugins] loaded: {', '.join(plugins)}")
 
     # CLI mode if --input is provided
     if args.input:

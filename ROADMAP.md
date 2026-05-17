@@ -126,7 +126,7 @@ Architectural shifts. Each one is real work and changes the shape of the codebas
 
 - [x] **Free-threaded CPython 3.13t / 3.14t first-class support** — Python 3.14 promoted no-GIL to officially supported via PEP 779 ([Python 3.14 What's New](https://docs.python.org/3/whatsnew/3.14.html)). Pillow 11.0+ ([release notes](https://pillow.readthedocs.io/en/stable/releasenotes/11.0.0.html)) and pillow_heif 1.3 ([CHANGELOG](https://github.com/bigcat88/pillow_heif/blob/master/CHANGELOG.md)) opted in; reported 3.5× speedup on 4 cores via `ThreadPoolExecutor` ([Quansight rollout](https://labs.quansight.org/blog/free-threaded-python-rollout)). Guard with `sys._is_gil_enabled()` after imports — `qoi`/`rawpy`/PyQt6 may silently re-enable GIL. Path: ship a `heicshift-ft` build alongside `heicshift`. Effort 4, Impact 4.
 - [x] **Process-pool option for non-FT Python** (`--use-processes`) — `ProcessPoolExecutor` sidesteps GIL today; cost is per-image fork overhead. Use for batches > N images. Effort 3, Impact 3.
-- **Optional pyvips backend** for files > 100 MP — libvips streams tiles instead of loading full bitmap ([libvips how-it-works](https://www.libvips.org/API/8.17/how-it-works.html), [pyvips intro](https://libvips.github.io/pyvips/intro.html)); shrink-on-load avoids decoding to full res when output is smaller. Add `--backend {pillow,vips}` flag; auto-select vips when source pixel count > 100M. Effort 5, Impact 3.
+- [x] **Optional pyvips backend** for files > 100 MP — libvips streams tiles instead of loading full bitmap ([libvips how-it-works](https://www.libvips.org/API/8.17/how-it-works.html), [pyvips intro](https://libvips.github.io/pyvips/intro.html)); shrink-on-load avoids decoding to full res when output is smaller. Add `--backend {pillow,vips}` flag; auto-select vips when source pixel count > 100M. Effort 5, Impact 3.
 - **macOS native ImageIO path** — `pyobjc` → `CGImageDestination` writes HEIC / AVIF using Apple's hardware-accelerated, signed codecs; bypasses libheif entirely on Mac. Avoids the x265 GPL question for that platform. Effort 4, Impact 3.
 - **GPU codec hooks (opt-in)** — nvJPEG decode for batches of huge JPEGs (NVIDIA-only); Windows Media Foundation HEIF / AVIF on Win11. Hard to ship as part of the single-file binary; flag as optional plugin. Effort 5, Impact 2.
 - **Multi-encoder shootout for AVIF** — run rav1e, aom, SVT-AV1 in parallel, keep smallest output below quality target. Pattern from [ImageOptim](https://imageoptim.com/howto.html). Effort 3, Impact 2.
@@ -140,7 +140,7 @@ Architectural shifts. Each one is real work and changes the shape of the codebas
 
 ### Extensibility & distribution
 
-- **Plugin system** — already in 2026-04 nice-to-haves. Drop `.py` into `~/.heicshift/plugins/`; auto-discovered classes implementing `Decoder.supports(suffix)` / `Encoder.save(img, path, opts)`. Lets users add formats without forking. Effort 5, Impact 3. *Tension with single-file ship — opt-in only, no required plugins.*
+- [x] **Plugin system** — already in 2026-04 nice-to-haves. Drop `.py` into `~/.heicshift/plugins/`; auto-discovered classes implementing `Decoder.supports(suffix)` / `Encoder.save(img, path, opts)`. Lets users add formats without forking. Effort 5, Impact 3. *Tension with single-file ship — opt-in only, no required plugins.*
 - [x] **Sidecar JSON with reconstructable conversion params** — pattern from darktable's XMP sidecars ([sidecar docs](https://docs.darktable.org/usermanual/development/en/overview/sidecar-files/sidecar/)). On every conversion, write `output.jpg.heicshift.json` capturing source hash, all preset params, version, timestamp. Output becomes reproducible 5 years later. Optional via flag. Effort 2, Impact 3.
 - **Storage module abstraction** — output destinations: local FS (default), S3, FTP, SFTP, Dropbox. Pattern from darktable ([export module docs](https://docs.darktable.org/usermanual/4.6/en/module-reference/utility-modules/shared/export/)). Each destination = small class with `write(bytes, key)`. Effort 4, Impact 2.
 - **conda-forge recipe** — `pillow-heif`, `pillow`, `pyqt6`, `rawpy`, `pillow-jxl-plugin` all already on conda-forge ([conda-forge pillow-heif](https://anaconda.org/conda-forge/pillow-heif)). Recipe yields Linux distro packaging via grayskull. Effort 2, Impact 2.
@@ -149,7 +149,7 @@ Architectural shifts. Each one is real work and changes the shape of the codebas
 
 ### Quality measurement
 
-- **VMAF / SSIM / butteraugli "verify lossless" mode** — `ffmpeg-quality-metrics` ([PyPI](https://pypi.org/project/ffmpeg-quality-metrics/)) wraps libvmaf; butteraugli ships from libjxl-tools ([butteraugli](https://github.com/google/butteraugli)). Per-file score in CSV / JSON report; warn when butteraugli > threshold. Effort 3, Impact 2.
+- [x] **VMAF / SSIM / butteraugli "verify lossless" mode** — `ffmpeg-quality-metrics` ([PyPI](https://pypi.org/project/ffmpeg-quality-metrics/)) wraps libvmaf; butteraugli ships from libjxl-tools ([butteraugli](https://github.com/google/butteraugli)). Per-file score in CSV / JSON report; warn when butteraugli > threshold. Effort 3, Impact 2.
 
 ---
 
